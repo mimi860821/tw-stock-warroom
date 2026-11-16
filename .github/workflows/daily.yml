@@ -1,0 +1,56 @@
+name: 每日更新
+
+on:
+  schedule:
+    # GitHub 的排程用 UTC。台北時間 = UTC + 8。
+    - cron: "17 23 * * 0-4"   # 台北 07:17 週一～週五：盤前版（已含前一晚美股收盤）
+    - cron: "43 9 * * 1-5"    # 台北 17:43 週一～週五：盤後版（已含當日收盤與三大法人）
+  workflow_dispatch:           # 也可以到 Actions 頁面手動執行
+
+permissions:
+  contents: write      # 把每日預測、籌碼快取、新聞存檔寫回 repo（復盤需要）
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: 執行分析
+        run: python -m warroom.pipeline
+
+      - name: 存回預測與快取
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          if git diff --cached --quiet; then
+            echo "資料沒有變動"
+          else
+            git commit -m "data: $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M') 更新"
+            git push
+          fi
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
