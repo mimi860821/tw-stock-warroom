@@ -2,7 +2,7 @@
 
 資料全部來自證交所、櫃買中心的公開資料，免金鑰。
 
-* 估值歷史：每隔 20 個交易日抓一次全市場的本益比、淨值比、殖利率，存在 data/valuation/。
+* 估值歷史：約每半個月抓一次全市場的本益比、淨值比、殖利率，存在 data/valuation/。
   有了歷史才能做「樣本外回測」，判斷估值因子在台股到底有沒有用、方向是什麼。
 * 財報與月營收：只有最新一期，用來做三位大師的檢核清單（無法回測，所以只以小權重參與排名，
   並由復盤自動調整權重）。
@@ -104,7 +104,7 @@ def fetch_val_today() -> tuple[datetime | None, dict]:
     return day or tp_day, out
 
 
-def load_valuation(dates: pd.DatetimeIndex, codes: list[str], every: int = 20, max_fetch: int = 45) -> dict[str, pd.DataFrame]:
+def load_valuation(dates: pd.DatetimeIndex, codes: list[str], max_fetch: int = 45) -> dict[str, pd.DataFrame]:
     """回傳 {pe, pb, dy} 三張「交易日 × 股票」寬表（向前填補，最多沿用 45 個交易日）。
 
     每一筆都是當天公布、當天已知的數字，所以回測不會偷看未來。
@@ -115,7 +115,16 @@ def load_valuation(dates: pd.DatetimeIndex, codes: list[str], every: int = 20, m
         p = VAL_DIR / f"{day:%Y%m%d}.json.gz"
         if not p.exists():
             _gz_write(p, today)
-    wanted = list(dates[::-1][::every])[1:]           # 最新一天已由 OpenAPI 取得
+    # 取樣日固定為「每月 1 日與 16 日之後的第一個交易日」，不隨執行日期位移，快取才能重複使用
+    ds = pd.Series(dates, index=dates)
+    anchors = ds.groupby([dates.year, dates.month, dates.day >= 16]).first()
+    have = sorted(pd.Timestamp(f.name[:8]) for f in VAL_DIR.glob("*.json.gz"))
+    have_idx = pd.DatetimeIndex(have) if have else pd.DatetimeIndex([])
+
+    def covered(d: pd.Timestamp) -> bool:          # 前後 8 天內已有快照就不必再抓
+        return len(have_idx) > 0 and bool((abs(have_idx - d) <= pd.Timedelta(days=8)).any())
+
+    wanted = [d for d in anchors.sort_values(ascending=False) if d != dates[-1] and not covered(d)]
     fetched = failed = 0
     for d in wanted:
         p = VAL_DIR / f"{d:%Y%m%d}.json.gz"

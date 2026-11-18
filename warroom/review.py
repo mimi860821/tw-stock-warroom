@@ -78,7 +78,8 @@ def evaluate(preds: list[dict], adj: pd.DataFrame, taiex: pd.Series, names: dict
         order = np.argsort(-np.where(ok, p_up, -np.inf))
         top, bottom = order[: C.TOP_N], np.argsort(np.where(ok, p_up, np.inf))[: C.TOP_N]
         mreal = float(taiex.iloc[i + h] / taiex.iloc[i] - 1)
-        hi = ok & (conf >= C.HICONF)
+        # 高信心＝當天信心值最高的 10%（信心值都被壓回 50 時就沒有高信心樣本）
+        hi = ok & (conf >= np.quantile(conf[ok], 0.9)) & (conf > 50.05) if ok.any() else ok
         row.update({
             "status": "已到期" if h >= H else f"進行中（第 {h} 天）",
             "n": int(ok.sum()),
@@ -129,16 +130,17 @@ def evaluate(preds: list[dict], adj: pd.DataFrame, taiex: pd.Series, names: dict
             "ic": _r(_mean(r["ic"] for r in sel), 3),
             "mkt_hit": _r(np.mean([r["mkt_hit"] for r in sel]) * 100, 1),
             "bias": _r(_mean(r["pred_avg"] - r["uni_ret"] for r in sel)),
+            "mkt_bias": _r(_mean(r["mkt_mu"] * r["h"] / H - r["mkt_real"] for r in sel)),
         }
 
     buckets = []
     if pool:
         conf = np.array([p[1] for p in pool])
         hit = np.array([p[2] for p in pool], dtype=float)
-        for lo, hi_ in ((50, 52), (52, 55), (55, 60), (60, 101)):
+        for lo, hi_ in ((50, 50.5), (50.5, 51), (51, 52), (52, 101)):
             m = (conf >= lo) & (conf < hi_)
             if m.sum() >= 30:
-                buckets.append({"range": f"{lo}–{min(hi_, 100)}", "n": int(m.sum()),
+                buckets.append({"range": f"{lo:g}–{min(hi_, 100):g}", "n": int(m.sum()),
                                 "hit": _r(hit[m].mean() * 100, 1), "avg_conf": _r(conf[m].mean(), 1)})
 
     live = [r for r in rows if r["kind"] == "live"]
@@ -187,12 +189,12 @@ def suggestions(rv: dict, bt_stats: dict, factor_diag: list[dict], weights: dict
         if a["n_hi"] >= 100 and a["rel_hit"] is not None:
             if a["hit_hi"] - a["rel_hit"] >= 2:
                 out.append({"level": "good", "title": "信心值有鑑別力",
-                            "text": f"信心 ≥ {C.HICONF} 的訊號相對強弱命中率 {a['hit_hi']}%，高於全部訊號的 {a['rel_hit']}%。"
-                                    f"建議只把信心 {C.HICONF} 以上的訊號當作進出依據，其餘當作參考。"})
+                            "text": f"每天信心最高的 10% 訊號，相對強弱命中率 {a['hit_hi']}%，高於全部訊號的 {a['rel_hit']}%。"
+                                    "可以優先參考信心較高的訊號。"})
             elif a["hit_hi"] < a["rel_hit"] - 2:
                 out.append({"level": "warn", "title": "高信心訊號近期反而較不準",
-                            "text": f"信心 ≥ {C.HICONF} 的訊號命中率 {a['hit_hi']}%，低於整體 {a['rel_hit']}%。通常代表行情風格剛轉換"
-                                    "（原本有效的因子失靈）。模型每天會重新訓練與校準，但在命中率回升前建議降低部位。"})
+                            "text": f"每天信心最高的 10% 訊號命中率 {a['hit_hi']}%，低於整體 {a['rel_hit']}%。通常代表行情風格剛轉換"
+                                    "（原本有效的因子失靈）。系統會依近期可靠度自動把信心值壓回 50 附近，直到命中率回升。"})
         if a["rel_hit"] is not None:
             lvl = "good" if a["rel_hit"] >= 52 else "warn" if a["rel_hit"] < 49 else "info"
             out.append({"level": lvl, "title": f"相對強弱命中率 {a['rel_hit']}%（基準 50%）",
@@ -216,9 +218,13 @@ def suggestions(rv: dict, bt_stats: dict, factor_diag: list[dict], weights: dict
                                    if a["mkt_hit"] < 58 else "近期大盤方向判斷可靠度尚可。")})
         if a["bias"] is not None and abs(a["bias"]) >= 1.5:
             word = "偏樂觀" if a["bias"] > 0 else "偏保守"
+            mb = a.get("mkt_bias")
+            src = (f"其中大盤本身的偏差就有 {mb:+.2f} 個百分點，代表偏差主要來自這段期間大盤的漲跌，而不是選股；"
+                   "大盤方向目前沒有可靠的預測方法（回測過的趨勢濾網反而更差），請把預期報酬當成「相對強弱 + 長期平均」來看。"
+                   if mb is not None and abs(mb) >= abs(a["bias"]) * 0.6 else
+                   "偏差主要來自個股部分，若持續出現，代表模型對個股的幅度估計需要下修。")
             out.append({"level": "warn", "title": f"預測整體{word}",
-                        "text": f"同期間平均預測比實際高出 {a['bias']:+.2f} 個百分點。解讀預期報酬時請自行扣除這個偏差；"
-                                "若持續出現，可調整 config.py 的 MARKET_DRIFT_PRIOR。"})
+                        "text": f"同期間平均預測比實際高出 {a['bias']:+.2f} 個百分點。{src}"})
     bad = [f for f in factor_diag if f["flag"] == "against"][:3]
     if bad:
         out.append({"level": "warn", "title": "近期失靈的因子",
@@ -234,6 +240,16 @@ def suggestions(rv: dict, bt_stats: dict, factor_diag: list[dict], weights: dict
         if w:
             out.append({"level": "info" if w["weight"] == 1.0 else "good" if w["weight"] > 1 else "warn",
                         "title": f"{label}疊加權重：{w['weight']:.2f}", "text": w["why"] + "。"})
+    rb = {b["label"]: b for b in bt_stats.get("rank_buckets", [])}
+    if "前 1%" in rb and "後 1–5%" in rb:
+        out.append({"level": "info", "title": "這個模型的價值在「幅度」，不在命中率",
+                    "text": f"滾動回測中，排名前 1% 的股票 15 日平均超額 {rb['前 1%']['mean']:+.2f}%、前 1–5% {rb['前 1–5%']['mean']:+.2f}%，"
+                            f"後 1–5% {rb['後 1–5%']['mean']:+.2f}%；但它們贏過中位數的比例只有 {rb['前 1%']['beat']:.0f}% 左右。"
+                            "也就是說看好名單不是每檔都會贏，而是贏的時候贏比較多。請以「整組名單的平均表現」評估，不要用單檔命中率。"})
+    if bt_stats.get("reliability") is not None and bt_stats.get("slope_long", 0) > 0:
+        out.append({"level": "good" if bt_stats["reliability"] >= 0.7 else "warn", "title": f"信心值可靠度係數 {bt_stats['reliability']:.2f}",
+                    "text": f"近 {C.CALIB_RECENT_DAYS} 個已到期交易日，信心最高的 10% 訊號實際命中率與宣稱值的比例。"
+                            "低於 1 時系統會等比例把信心值壓向 50，避免看起來很有把握卻是錯的；之後若命中率回升會自動放大。"})
     if bt_stats.get("hit_rate") is not None:
         out.append({"level": "info", "title": "長期回測基準",
                     "text": f"滾動回測 {bt_stats['days']} 個交易日（{bt_stats['from']} 起，樣本外）：相對強弱命中率 {bt_stats['rel_hit']}%（基準 50%），"

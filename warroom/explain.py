@@ -122,13 +122,16 @@ def signals(x: dict) -> list[dict]:
     return [{"name": a, "value": b_, "view": c, "text": d_} for a, b_, c, d_ in s]
 
 
-def summary_line(act: str, mu: float, conf: float, parts: dict) -> str:
+def summary_line(act: str, mu: float, conf: float, parts: dict, rank_hist: dict | None = None) -> str:
     """一句話結論：最大的加分與扣分來源。"""
     named = {"market": "大盤走勢", "alpha": "技術面與估值", "news": "新聞情緒", "chips": "法人與融資籌碼", "us": "美股隔夜",
              "fund": "基本面品質與成長", "pattern": "K 線型態"}
     pos = [named[k] for k, v in sorted(parts.items(), key=lambda kv: -kv[1]) if v > 0.002][:2]
     neg = [named[k] for k, v in sorted(parts.items(), key=lambda kv: kv[1]) if v < -0.002][:2]
-    bits = [f"未來 15 個交易日預期報酬 {mu * 100:+.1f}%，信心 {conf:.0f}（{'贏過' if act in ('strong_buy', 'buy') or (act == 'neutral' and parts.get('alpha', 0) >= 0) else '落後'}股票池中位數的機率）"]
+    bits = [f"未來 15 個交易日預期報酬 {mu * 100:+.1f}%"]
+    if rank_hist:
+        bits.append(f"排名{rank_hist['label']}的股票，歷史上 15 日平均超額 {rank_hist['mean']:+.2f}%、"
+                    f"贏過中位數 {rank_hist['beat']:.0f}%")
     if pos:
         bits.append("主要加分：" + "、".join(pos))
     if neg:

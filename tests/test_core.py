@@ -55,6 +55,7 @@ def test_walk_forward_never_uses_future_labels():
     alt = run(changed)
     n = len(base.idx) - 15
     assert np.allclose(base.alpha[:n], alt.alpha[:n], equal_nan=True)
+    assert np.allclose(base.p_win[:n], alt.p_win[:n], equal_nan=True)     # 信心校準也只用當時已知的資料
 
 
 def test_align_prev_uses_strictly_earlier_us_close():
@@ -186,3 +187,24 @@ def test_review_handles_old_and_new_prediction_widths():
               "stocks": {c: ([0.01, 0.6, 0, 0, 0] if i % 2 else [0.01, 0.4, 0.001, 0, 0, 0.002, -0.001]) for i, c in enumerate(codes)}}]
     rv = review.evaluate(preds, adj, taiex, {c: c for c in codes})
     assert rv["rows"][0]["h"] == 15 and set(rv["overlay_ic"]) == set(review.OVERLAY_COLS)
+
+
+def test_rank_bucket_lookup():
+    stats = {"rank_buckets": [{"lo": 0, "hi": .01, "label": "前 1%"}, {"lo": .01, "hi": .05, "label": "前 1–5%"},
+                              {"lo": .95, "hi": 1.0, "label": "後 5%"}]}
+    assert model.rank_bucket(stats, 1, 450)["label"] == "前 1%"
+    assert model.rank_bucket(stats, 10, 450)["label"] == "前 1–5%"
+    assert model.rank_bucket(stats, 450, 450)["label"] == "後 5%"
+    assert model.rank_bucket(stats, 200, 450) is None
+
+
+def test_market_up_freq_shrinks_toward_half():
+    adj, taiex, vol = _prices(n=400, k=30)
+    f = features.compute(adj, adj, adj * 1.01, adj * 0.99, vol, vol * adj)
+    breadth = (adj > f["_ma20"]).sum(axis=1) / adj.notna().sum(axis=1)
+    p = model.build_panel(adj, taiex, f, features.market_features(taiex, breadth, {}))
+    freq, k = model.up_freq(p, 399, 15)
+    raw = (p.mfwd[15][60:399 - 15 + 1] > 0).mean()
+    assert k > 300 and abs(freq - 0.5) < abs(raw - 0.5) + 1e-12
+    fr, kr = model.up_freq(p, 399, 15, regime=True)
+    assert 0 < kr < k

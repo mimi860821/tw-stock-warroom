@@ -159,7 +159,24 @@ class MarketModel:
         return np.nan_to_num(np.clip(z, -3, 3)) * self.coef
 
     def predict(self, row: pd.Series) -> float:
-        return float(self.intercept + self.parts(row).sum())
+        return float(self.intercept + C.MARKET_FACTOR_WEIGHT * self.parts(row).sum())
+
+
+def up_freq(p: Panel, T: int, h: int, regime: bool = False) -> tuple[float, int]:
+    """第 T 天當下已知的歷史中，15 日後大盤上漲的頻率（往 50% 收縮）。regime=True 時只看與目前同樣在季線上／下的日子。"""
+    past = np.arange(60, T - h + 1)
+    y = p.mfwd[h][past]
+    keep = np.isfinite(y)
+    if regime:
+        tx = p.taiex.values
+        ma60 = p.taiex.rolling(60).mean().values
+        keep &= (tx[past] > ma60[past]) == (tx[T] > ma60[T])
+    y = y[keep]
+    k = len(y)
+    if k == 0:
+        return 0.5, 0
+    r = float((y > 0).mean())
+    return 0.5 + (r - 0.5) * k / (k + C.MARKET_FREQ_SHRINK), k
 
 
 def fit_market(p: Panel, T: int, h: int) -> MarketModel:
@@ -188,7 +205,8 @@ class Backtest:
     alpha: np.ndarray               # [天, 股票] 樣本外相對強度分數
     mkt: np.ndarray                 # [天] 樣本外大盤預測
     mu: np.ndarray                  # [天, 股票] 個股總預期報酬
-    slope: float                    # 信心校準斜率
+    p_win: np.ndarray               # [天, 股票] 當天「只用已到期資料」校準出的贏過中位數機率
+    slope: float                    # 今天使用的信心校準斜率（長期斜率 × 近期可靠度）
     alpha_sd: float                 # 分數的典型離散度
     stats: dict
 
@@ -215,13 +233,39 @@ def walk_forward(p: Panel) -> Backtest:
     with np.errstate(invalid="ignore"):
         med = np.nanmedian(np.where(ok, real, np.nan), axis=1, keepdims=True)
     beat = real > med
-    slope = 0.0
-    if ok.sum() > 2000:
-        _, slope = fit_logistic(alpha[ok], beat[ok].astype(float))
-        slope = max(slope, 0.0)          # 樣本外沒有鑑別力時斜率歸零，信心值全部回到 50
     alpha_sd = float(np.nanstd(alpha[ok])) if ok.any() else 0.05
 
-    pw = prob_win(alpha, slope)
+    # ── 信心校準：每天只用「當時已經過完 15 天」的資料，並依近期可靠度縮放（不偷看未來）──
+    nd = len(idx)
+    matured_row = idx <= n - 1 - h
+
+    def calibrate(i: int) -> tuple[float, float, float]:
+        avail = np.where(matured_row & (np.arange(nd) <= i - h))[0]
+        m = ok[avail]
+        if m.sum() < 2000:
+            return 0.0, 0.0, 0.0
+        _, b_long = fit_logistic(alpha[avail][m], beat[avail][m].astype(float))
+        if b_long <= 0:
+            return 0.0, 0.0, 0.0
+        rec = avail[-C.CALIB_RECENT_DAYS:]
+        pr = prob_win(alpha[rec], b_long)
+        mr = ok[rec]
+        cr, hr = np.maximum(pr, 1 - pr)[mr], ((pr > 0.5) == beat[rec])[mr]
+        if cr.size < 1000:
+            return b_long, 0.0, 0.0
+        top = cr >= np.quantile(cr, 0.9)
+        # 近期「最有信心的 10%」實際命中幾成？宣稱 52% 但只中 50% → 係數 0，信心值全部壓回 50
+        fac = float(np.clip((hr[top].mean() - 0.5) / max(cr[top].mean() - 0.5, 1e-6), 0, 1))
+        return b_long, fac, b_long * fac
+
+    p_win = np.full(alpha.shape, np.nan)
+    cal = (0.0, 0.0, 0.0)
+    for i in range(nd):
+        if i % C.REFIT_EVERY == 0:
+            cal = calibrate(i)
+        p_win[i] = prob_win(alpha[i], cal[2])
+    slope_long, reliability, slope = calibrate(nd - 1 + h)        # 今天：所有已到期資料
+    pw = p_win
     conf = np.maximum(pw, 1 - pw) * 100
     rel_hit = ((alpha > 0) == beat) & ok
     hit = (np.sign(mu) == np.sign(real)) & ok
@@ -231,8 +275,10 @@ def walk_forward(p: Panel) -> Backtest:
 
     top_ret, bot_ret, uni_ret = [], [], []
     for i in np.where(matured)[0]:
-        order = np.argsort(np.where(ok[i], -alpha[i], np.inf))
         nv = int(ok[i].sum())
+        if nv < 50:
+            continue
+        order = np.argsort(np.where(ok[i], -alpha[i], np.inf))
         top_ret.append(real[i][order[: C.TOP_N]].mean())
         bot_ret.append(real[i][order[nv - C.TOP_N: nv]].mean())
         uni_ret.append(real[i][ok[i]].mean())
@@ -240,13 +286,29 @@ def walk_forward(p: Panel) -> Backtest:
     mreal = p.mfwd[h][idx]
     mok = np.isfinite(mreal)
 
+    phit = ((pw > 0.5) == beat) & ok
     buckets = []
-    for lo, hi in ((50, 52), (52, 54), (54, 56), (56, 101)):
+    for lo, hi in ((50, 50.5), (50.5, 51), (51, 52), (52, 101)):
         m = ok & (conf >= lo) & (conf < hi)
         if m.sum() >= 50:
-            buckets.append({"range": f"{lo}–{min(hi, 100)}", "n": int(m.sum()),
-                            "hit": round(float(rel_hit[m].mean()) * 100, 1), "avg_conf": round(float(conf[m].mean()), 1)})
-    hi_conf = ok & (conf >= C.HICONF)
+            buckets.append({"range": f"{lo:g}–{min(hi, 100):g}", "n": int(m.sum()),
+                            "hit": round(float(phit[m].mean()) * 100, 1), "avg_conf": round(float(conf[m].mean()), 1)})
+    # 依當天排名分組：樣本外的平均超額報酬與贏過中位數比例（這個模型的價值主要在「幅度」）
+    with np.errstate(invalid="ignore"):
+        ex = real - np.nanmean(np.where(ok, real, np.nan), axis=1, keepdims=True)
+    rank_pct = np.full(alpha.shape, np.nan)
+    for i in range(nd):
+        mi = ok[i]
+        if mi.sum() > 50:
+            rank_pct[i, mi] = pd.Series(alpha[i, mi]).rank(pct=True, ascending=False).values     # 0＝最強
+    rank_buckets = []
+    for (lo, hi), label in zip(RANK_EDGES, RANK_LABELS):
+        m = ok & (rank_pct > lo) & (rank_pct <= hi)
+        if m.sum() >= 50:
+            rank_buckets.append({"lo": lo, "hi": hi, "label": label, "n": int(m.sum()),
+                                 "mean": round(float(np.nanmean(ex[m])) * 100, 2), "median": round(float(np.nanmedian(ex[m])) * 100, 2),
+                                 "beat": round(float(beat[m].mean()) * 100, 1)})
+    hi_conf = ok & (conf >= np.nanquantile(np.where(ok, conf, np.nan), 0.9)) & (conf > 50.05)
     half = int(fin.sum()) // 2
     icv = ics[fin]
 
@@ -258,7 +320,7 @@ def walk_forward(p: Panel) -> Backtest:
         "from": f"{p.dates[idx[0]]:%Y-%m-%d}",
         "to": f"{p.dates[idx[matured][-1]]:%Y-%m-%d}" if matured.any() else None,
         "rel_hit": pct(rel_hit[ok].mean()) if ok.any() else None,
-        "rel_hit_hiconf": pct(rel_hit[hi_conf].mean()) if hi_conf.sum() > 50 else None,
+        "rel_hit_hiconf": pct(phit[hi_conf].mean()) if hi_conf.sum() > 50 else None,
         "hiconf_share": pct(hi_conf.sum() / max(ok.sum(), 1)),
         "hit_rate": pct(hit[ok].mean()) if ok.any() else None,
         "up_share": pct((real[ok] > 0).mean()) if ok.any() else None,
@@ -272,9 +334,23 @@ def walk_forward(p: Panel) -> Backtest:
         "top_win": pct((top_ret > uni_ret).mean()) if len(top_ret) else None,
         "mkt_hit": pct((np.sign(mkt[mok]) == np.sign(mreal[mok])).mean()) if mok.any() else None,
         "mkt_up_share": pct((mreal[mok] > 0).mean()) if mok.any() else None,
-        "slope": round(slope, 3), "buckets": buckets,
+        "slope": round(slope, 3), "slope_long": round(slope_long, 3), "reliability": round(reliability, 2),
+        "buckets": buckets, "rank_buckets": rank_buckets,
     }
-    return Backtest(idx, alpha, mkt, mu, slope, alpha_sd, stats)
+    return Backtest(idx, alpha, mkt, mu, p_win, slope, alpha_sd, stats)
+
+
+RANK_EDGES = [(0, .01), (.01, .05), (.05, .20), (.20, .50), (.50, .80), (.80, .95), (.95, .99), (.99, 1.0)]
+RANK_LABELS = ["前 1%", "前 1–5%", "前 5–20%", "前 20–50%", "後 20–50%", "後 5–20%", "後 1–5%", "後 1%"]
+
+
+def rank_bucket(stats: dict, rank: int, n: int) -> dict | None:
+    """名次 → 該排名區間的樣本外歷史表現。"""
+    q = rank / n
+    for b in stats.get("rank_buckets", []):
+        if b["lo"] < q <= b["hi"]:
+            return b
+    return None
 
 
 # ── 最新一天的預測 ────────────────────────────────────────────────────────

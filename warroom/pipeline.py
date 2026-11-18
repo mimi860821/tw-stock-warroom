@@ -158,11 +158,10 @@ def run() -> None:
         d = f"{adj.index[bt.idx[i]]:%Y-%m-%d}"
         if (review.PRED_DIR / f"{d}.json").exists():
             continue
-        p_win = model.prob_win(bt.alpha[i], bt.slope)
-        m_sig = float(taiex.pct_change().ewm(span=60).std().iloc[bt.idx[i]] * math.sqrt(H))
+        p_win = bt.p_win[i]
         review.save_prediction(d, {
             "asof": d, "kind": "backtest",
-            "market": {"mu": round(float(bt.mkt[i]), 5), "p_up": round(float(model.norm_cdf(bt.mkt[i] / m_sig)), 4)},
+            "market": {"mu": round(float(bt.mkt[i]), 5), "p_up": round(model.up_freq(panel, int(bt.idx[i]), H)[0], 4)},
             "stocks": {c: [round(float(bt.mu[i, j]), 5), round(float(p_win[j]), 4), 0, 0, 0]
                        for j, c in enumerate(codes) if np.isfinite(bt.mu[i, j])},
         })
@@ -221,17 +220,26 @@ def run() -> None:
 
     # ── 大盤預測 ──
     m_sig_d = float(taiex.pct_change().ewm(span=60).std().iloc[-1])
+    last_i = len(adj) - 1
     mkt_mu = {h: live.mkt_mu[h] + mkt_news_adj * h / H + us["impact"] for h in C.HORIZONS}
-    mkt_p = float(model.norm_cdf(mkt_mu[H] / (m_sig_d * math.sqrt(H))))
+    # 上漲機率＝歷史上 15 日後大盤上漲的頻率（樣本外校準最好），再依新聞與美股的調整微幅移動
+    freq, freq_n = model.up_freq(panel, last_i, H)
+    freq_r, freq_rn = model.up_freq(panel, last_i, H, regime=True)
+    shift = (mkt_news_adj + us["impact"]) / (m_sig_d * math.sqrt(H)) * 0.4      # 常態分配在 0 附近的斜率約 0.4
+    mkt_p = float(np.clip(freq + shift, 0.02, 0.98))
     mm = live.market[H]
     mkt_parts = [{"label": "長期平均漂移", "contrib": _pct(mm.intercept),
-                  "text": f"訓練期間平均與長期年化 {C.MARKET_DRIFT_PRIOR:.0%} 先驗值各半混合"}]
+                  "text": f"台股長期年化約 {C.MARKET_DRIFT_PRIOR:.0%} 換算成 15 個交易日；不外推近期多頭或空頭的報酬"}]
     row = M.iloc[-1]
+    above = bool(taiex.iloc[-1] > taiex.rolling(60).mean().iloc[-1])
+    mkt_state = [{"label": "季線位置", "value": "季線之上" if above else "季線之下",
+                  "text": f"歷史上同樣在季線{'之上' if above else '之下'}的 {freq_rn} 天中，15 日後上漲的比例約 {freq_r * 100:.0f}%"
+                          f"（全部 {freq_n} 天為 {freq * 100:.0f}%）"}]
     for col, c in sorted(zip(mm.cols, mm.parts(row)), key=lambda x: -abs(x[1])):
-        if abs(c) >= 0.0005:
-            v = row[col]
-            vtxt = f"{v:.1f}" if col in ("m_rsi", "u_vix") else f"{v * 100:+.1f}%"
-            mkt_parts.append({"label": features.MARKET_FACTORS[col], "contrib": _pct(c), "text": f"目前數值 {vtxt}"})
+        v = row[col]
+        vtxt = f"{v:.1f}" if col in ("m_rsi", "u_vix") else f"{v * 100:+.1f}%"
+        mkt_state.append({"label": features.MARKET_FACTORS[col], "value": vtxt, "model": _pct(c),
+                          "text": "模型原本的解讀：" + ("偏多" if c > 0.0005 else "偏空" if c < -0.0005 else "中性")})
     if abs(mkt_news_adj) >= 0.0003:
         mkt_parts.append({"label": "新聞情緒", "contrib": _pct(mkt_news_adj),
                           "text": f"市場相關新聞加權情緒 {nz['market_sent']:+.2f}（−1 極負面 ~ +1 極正面）"})
@@ -351,15 +359,16 @@ def run() -> None:
         mu_, conf_, parts_ = stocks[c].pop("_m")
         act = explain.action(rank, len(order), mu_)
         stocks[c]["rank"], stocks[c]["of"] = rank, len(order)
+        stocks[c]["forecast"]["rank_hist"] = model.rank_bucket(bt.stats, rank, len(order))
         stocks[c]["forecast"].update(action=act, label=explain.ACTION_LABEL[act], advice=explain.ACTION_TEXT[act],
-                                     summary=explain.summary_line(act, mu_, conf_, parts_))
+                                     summary=explain.summary_line(act, mu_, conf_, parts_, stocks[c]["forecast"]["rank_hist"]))
 
     def brief(c: str) -> dict:
         s = stocks[c]
         f = s["forecast"]
         return {"code": c, "name": s["name"], "industry": s["industry"], "close": s["close"], "chg": s["chg"],
                 "mu": f["mu"][str(H)], "conf": f["conf"], "p_win": f["p_win"], "action": f["action"], "label": f["label"],
-                "rank": s["rank"], "why": [r.get("short", r["label"]) + (" ↑" if r["contrib"] > 0 else " ↓") for r in
+                "rank": s["rank"], "rank_hist": f.get("rank_hist"), "why": [r.get("short", r["label"]) + (" ↑" if r["contrib"] > 0 else " ↓") for r in
                                            sorted(s["reasons"][1:], key=lambda r: -abs(r["contrib"]))[:3]],
                 "summary": f["summary"]}
 
@@ -452,7 +461,7 @@ def run() -> None:
         s, f, cd, al = stocks[c], fund[c], chip_detail.get(c, {}), alerts.get(c, {})
         return {"c": c, "n": s["name"], "i": s["industry"], "m": s["market"], "px": s["close"], "chg": s["chg"],
                 "mu": s["forecast"]["mu"][str(H)], "conf": s["forecast"]["conf"], "p": s["forecast"]["p_win"],
-                "a": s["forecast"]["action"], "r": s["rank"],
+                "a": s["forecast"]["action"], "r": s["rank"], "rx": (s["forecast"]["rank_hist"] or {}).get("mean"),
                 "pe": f["pe"], "pb": f["pb"], "dy": f["dy"], "roe": f["roe"], "gm": f["gm"], "debt": f["debt"],
                 "rev": f["rev_cum_yoy"], "revm": f["rev_yoy"], "epsg": f["eps_g"], "peg": f["peg"], "mos": f["mos"],
                 "gs": f["graham"]["score"], "gv": f["graham_price_ok"], "bs": f["buffett"]["score"], "ls": f["lynch"]["score"], "lc": f["lynch"]["category"],
@@ -477,9 +486,12 @@ def run() -> None:
                      zip(tw.index[tail], tw["open"].iloc[tail], tw["close"].iloc[tail], tw["low"].iloc[tail], tw["high"].iloc[tail])],
             "mu": {str(h): _pct(mkt_mu[h]) for h in C.HORIZONS}, "p_up": round(mkt_p * 100, 1),
             "conf": round(max(mkt_p, 1 - mkt_p) * 100, 1),
-            "view": "偏多" if mkt_p >= 0.55 else "偏空" if mkt_p <= 0.45 else "中性",
+            # 上漲機率本來就以歷史常態（約 67%）為基準，只有新聞、美股讓它明顯偏離常態時才標示偏多／偏空
+            "view": "偏多" if mkt_p >= freq + 0.05 else "偏空" if mkt_p <= freq - 0.05 else "常態",
             "path": _path(float(taiex.iloc[-1]), m_mus, us["impact"], m_sig_d),
-            "parts": mkt_parts, "breadth": _pct(breadth.iloc[-1], 1),
+            "parts": mkt_parts, "state": mkt_state, "freq": round(freq * 100, 1), "freq_n": freq_n,
+            "freq_regime": round(freq_r * 100, 1), "freq_regime_n": freq_rn, "above_ma60": above,
+            "breadth": _pct(breadth.iloc[-1], 1),
             "breadth_note": "站上月線的個股比例；高於 60% 代表多數股票偏強，低於 40% 代表普遍偏弱",
             "flows": flows,
             "dist": {k: sum(stocks[c]["forecast"]["action"] == k for c in codes) for k in explain.ACTION_LABEL},

@@ -148,7 +148,7 @@
     else if (state.list === 'master') rows = rows.filter((x) => masterScore(x) != null).sort((a, b) => masterScore(b) - masterScore(a)).slice(0, 40);
     return rows;
   }
-  const HINT = { bull: '相對強度排名前段（依信心值排序）', bear: '相對強度排名後段', master: '葛拉漢、巴菲特、林區三套評分的平均，越高越符合大師條件', all: '全部個股，依相對強度排名' };
+  const HINT = { bull: '相對強度排名前段；右側為 15 日預期報酬', bear: '相對強度排名後段', master: '葛拉漢、巴菲特、林區三套評分的平均，越高越符合大師條件', all: '全部個股，依相對強度排名' };
 
   function renderList() {
     $('#list-hint').textContent = HINT[state.list];
@@ -166,7 +166,7 @@
         <div class="nm"><b>${esc(x.n)}</b><small>${esc(x.c)}</small></div>
         <div class="rt num ${cls(x.mu)}">${pct(x.mu, 1)}</div>
         <div class="sub">${signed(x.chg)} <span class="hint" style="margin:0">${num(x.px)}</span></div>
-        <div class="rt2">信心 ${x.conf.toFixed(1)}・${ACT[x.a]}</div>
+        <div class="rt2">${ACT[x.a]}</div>
         ${tags.length ? `<div class="why">${tags.map(esc).join('・')}</div>` : ''}</div>`;
     }).join('') : empty('沒有符合的個股');
   }
@@ -196,6 +196,7 @@
       .map((k) => `<span class="badge ${ALERT[k][1]}">${ALERT[k][0]}${k === 'exdiv' ? ` ${esc((al.exdiv[0].date || '').slice(5))}` : ''}</span>`).join(' ');
   }
 
+  const rankTip = (b) => (b ? `滾動回測（樣本外）中排名${b.label}的股票共 ${b.n.toLocaleString()} 筆：15 日平均超額 ${pct(b.mean)}、中位數 ${pct(b.median)}、贏過股票池中位數 ${b.beat}%。平均為正但中位數為負，代表少數大漲股拉高平均。` : '');
   function renderStockHead(s) {
     const f = s.forecast, L = s.levels, I = s.indicators, fu = s.fund || {};
     const bear = f.p_win < 50;
@@ -206,7 +207,7 @@
       <div class="verdict"><b>${esc(f.summary)}</b> <span>${esc(f.advice)}</span></div>
       <div class="kpis">
         <div class="kpi"><div class="k">15 日預期報酬</div><div class="v ${cls(f.mu['15'])}">${pct(f.mu['15'])}</div><div class="s">5日 ${pct(f.mu['5'], 1)}・10日 ${pct(f.mu['10'], 1)}</div></div>
-        <div class="kpi"><div class="k">信心（${bear ? '落後' : '贏過'}中位數）</div><div class="v">${f.conf.toFixed(1)}</div><div class="meter split" style="margin-top:4px"><i style="width:${f.p_win}%"></i></div></div>
+        <div class="kpi" data-tip="${esc(rankTip(f.rank_hist))}"><div class="k">同排名歷史（${esc(f.rank_hist?.label || '–')}）</div><div class="v ${cls(f.rank_hist?.mean)}">${f.rank_hist ? pct(f.rank_hist.mean) : '–'}</div><div class="s">15 日平均超額・贏過中位數 ${f.rank_hist ? f.rank_hist.beat.toFixed(0) + '%' : '–'}・信心 ${f.conf.toFixed(1)}</div></div>
         <div class="kpi"><div class="k">15 日後預期價</div><div class="v">${num(L.target)}</div><div class="s">${num(f.path[15][2], 1)} ~ ${num(f.path[15][3], 1)}</div></div>
         <div class="kpi"><div class="k">支撐 / 壓力</div><div class="v">${num(L.support, 1)} / ${num(L.resistance, 1)}</div><div class="s">月線 ${num(L.ma20, 1)}・季線 ${num(L.ma60, 1)}</div></div>
         <div class="kpi"><div class="k">停損參考</div><div class="v">${num(L.stop)}</div><div class="s">收盤 − 2×ATR（${(2 * L.atr / s.close * 100).toFixed(1)}%）</div></div>
@@ -320,6 +321,7 @@
     $('#side-mkt').innerHTML = `<div class="ph" style="margin:0"><h3>大盤 15 日判斷</h3><span class="badge ${viewCls}">${esc(m.view)}</span></div>
       <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap"><span class="num ${cls(m.mu['15'])}" style="font-size:22px;font-weight:700">${pct(m.mu['15'])}</span>
         <span class="hint" style="margin:0">上漲機率 ${m.p_up}%・區間 ${num(m.path[15][2], 0)} ~ ${num(m.path[15][3], 0)}</span></div>
+      <div class="hint" style="margin:2px 0 0">${m.above_ma60 ? '季線之上' : '季線之下'}：歷史同狀態 15 日後上漲 ${m.freq_regime}%（${m.freq_regime_n} 天）</div>
       <div id="side-chart" style="height:120px"></div>
       <div class="distbar" style="margin:4px 0">${seg.map(([k, c, o]) => `<i style="flex:${m.dist[k]};background:${c};opacity:${o}" data-tip="${ACT[k]} ${m.dist[k]} 檔"></i>`).join('')}</div>
       <div class="legend"><span>看多 ${m.dist.strong_buy + m.dist.buy}</span><span>中立 ${m.dist.neutral}</span><span>看空 ${m.dist.strong_sell + m.dist.sell}</span><span>寬度 ${m.breadth}%</span></div>`;
@@ -374,6 +376,7 @@
     rev: ['累計營收年增', (x) => pct(x.rev, 1), (x) => x.rev ?? -1e9], revm: ['月營收年增', (x) => pct(x.revm, 1), (x) => x.revm ?? -1e9],
     epsg: ['EPS 年增', (x) => pct(x.epsg, 1), (x) => x.epsg ?? -1e9], peg: ['PEG', (x) => x.peg ?? '–', (x) => x.peg ?? 1e9],
     mos: ['安全邊際', (x) => pct(x.mos, 0), (x) => x.mos ?? -1e9],
+    rx: ['同排名歷史超額', (x) => `<span class="${cls(x.rx)}">${pct(x.rx)}</span>`, (x) => x.rx ?? -1e9],
     gs: ['葛拉漢', (x) => x.gs ?? '–', (x) => x.gs ?? -1], bs: ['巴菲特', (x) => x.bs ?? '–', (x) => x.bs ?? -1], ls: ['林區', (x) => x.ls ?? '–', (x) => x.ls ?? -1],
     ms: ['大師平均', (x) => (masterScore(x) == null ? '–' : masterScore(x).toFixed(0)), (x) => masterScore(x) ?? -1],
     lc: ['林區分類', (x) => esc(x.lc || '–'), (x) => x.lc || ''],
@@ -385,7 +388,7 @@
     vol: ['年化波動', (x) => (x.vol == null ? '–' : x.vol + '%'), (x) => x.vol ?? 1e9],
   };
   const SCREENS = [
-    { g: '模型', key: 'model', name: '模型綜合排名', desc: '技術面、估值、籌碼、新聞、基本面與 K 線型態綜合的相對強度排名。', f: () => true, s: 'r', d: 1, cols: ['mu', 'conf', 'a', 'pe', 'roe', 'rev'] },
+    { g: '模型', key: 'model', name: '模型綜合排名', desc: '技術面、估值、籌碼、新聞、基本面與 K 線型態綜合的相對強度排名。', f: () => true, s: 'r', d: 1, cols: ['mu', 'rx', 'conf', 'a', 'pe', 'roe', 'rev'] },
     { g: '模型', key: 'strong', name: '強力看多（前 5%）', desc: '相對強度前 5% 且絕對預期報酬為正。', f: (x) => x.a === 'strong_buy', s: 'r', d: 1, cols: ['mu', 'conf', 'pt', 'f5', 't5'] },
     { g: '模型', key: 'weak', name: '強力看空（後 5%）', desc: '相對強度後 5% 且絕對預期報酬為負，持有者宜留意。', f: (x) => x.a === 'strong_sell', s: 'r', d: -1, cols: ['mu', 'conf', 'pt', 'f5', 'mc'] },
     { g: '大師', key: 'graham', name: '葛拉漢價值股', desc: '防禦型投資人 7 項檢核（規模、流動比、持續獲利、盈餘成長、配息、本益比 ≤ 15、淨值比 ≤ 1.5 或 PE×PB ≤ 22.5）通過 70% 以上，且兩個價格條件都必須通過；依安全邊際排序。', f: (x) => x.gs >= 70 && x.gv, s: 'mos', d: -1, cols: ['gs', 'pe', 'pb', 'dy', 'mos', 'mu'] },
@@ -432,7 +435,10 @@
   function renderMarket() {
     const L = LATEST, m = L.market, u = L.us, f = m.flows;
     priceChart('mkt-chart', m.ohlc, m.path);
-    $('#mkt-parts').innerHTML = contribRows(m.parts, m.mu['15']);
+    $('#mkt-parts').innerHTML = contribRows(m.parts, m.mu['15'])
+      + `<h4>上漲機率怎麼來</h4><p class="hint" style="margin-top:0">${m.p_up}%＝歷史上 ${m.freq_n} 個交易日中 15 日後大盤上漲的比例（${m.freq}%），再依新聞與美股微調。
+          大盤因子在回測中與實際走勢負相關，所以只列數值供參考，不計入預測。</p>`
+      + `<h4>市場狀態（僅供參考，未計入預測）</h4>${(m.state || []).map((x) => `<div class="sig"><span>${esc(x.label)}</span><span>${esc(x.value)}</span><span class="t">${esc(x.text)}</span></div>`).join('')}`;
     $('#us-note').textContent = u.note;
     $('#us-tiles').innerHTML = u.panel.map((p) => `<div class="tile"><div class="k">${esc(p.name)}</div><div class="v">${num(p.close)}</div>
         <div>${signed(p.chg)}</div>${spark(p.spark, p.chg >= 0)}<div class="s">${p.date.slice(5)}・近 5 日 ${pct(p.chg5, 1)}</div></div>`).join('')
@@ -465,11 +471,11 @@
       tile('驗證的預測日數', a.days, `實際發布 ${rv.n_live}・回測補齊 ${rv.n_backtest}`),
       tile('相對強弱命中率', `${a.rel_hit}%`, '基準 50%'),
       tile('前 10 名超額報酬', `<span class="${cls(a.excess)}">${pct(a.excess)}</span>`, `${a.top_win}% 的日子勝出`),
-      tile('高信心命中率', a.n_hi >= 30 ? `${a.hit_hi}%` : '–', `信心 ≥ ${LATEST.model.hiconf}・${a.n_hi} 筆`),
+      tile('信心前 10% 命中率', a.n_hi >= 30 ? `${a.hit_hi}%` : '–', `每天信心最高的 10%・${a.n_hi} 筆`),
       tile('絕對方向命中率', `${a.hit}%`, `同期上漲比例 ${a.up_share}%`),
       tile('大盤方向命中率', `${a.mkt_hit}%`, `${a.days} 個預測日`),
       tile('已滿 15 日', mt ? mt.days : 0, mt ? `超額 ${pct(mt.excess)}・命中 ${mt.rel_hit}%` : '尚無'),
-      tile('一年滾動回測 IC', bt.ic, `前 10 名 ${pct(bt.top_ret)} 對 ${pct(bt.uni_ret)}`),
+      tile('滾動回測 IC', bt.ic, `前 10 名 ${pct(bt.top_ret)} 對 ${pct(bt.uni_ret)}`),
     ].join('') : empty('尚無可驗證的預測');
     const rows = rv.rows.filter((r) => r.h > 0).slice().reverse();
     const labels = rows.map((r) => r.date.slice(5)), faded = rows.map((r) => r.kind !== 'live');
@@ -477,6 +483,10 @@
     barChart('rv-excess', labels, rows.map((r) => r.excess), { faded, unit: ' 百分點', details: det });
     barChart('rv-hit', labels, rows.map((r) => r.rel_hit), { base: 50, faded, unit: '%', details: det });
     $('#rv-sugg').innerHTML = rv.suggestions.map((s) => `<div class="sugg ${s.level}"><b>${esc(s.title)}</b><span>${esc(s.text)}</span></div>`).join('');
+    const rb = bt.rank_buckets || [], mxr = Math.max(...rb.map((b) => Math.abs(b.mean)), 0.5);
+    $('#tbl-rank').innerHTML = '<thead><tr><th>當天排名</th><th class="r">樣本數</th><th class="r">15 日平均超額</th><th class="r">中位數超額</th><th class="r">贏過中位數</th></tr></thead><tbody>'
+      + rb.map((b) => `<tr><td>${esc(b.label)}</td><td class="r">${b.n.toLocaleString()}</td><td class="r"><span class="num ${cls(b.mean)}">${pct(b.mean)}</span><i class="inbar" style="width:${Math.abs(b.mean) / mxr * 40}px;background:${b.mean >= 0 ? C.up : C.dn}"></i></td>
+        <td class="r ${cls(b.median)}">${pct(b.median)}</td><td class="r">${b.beat}%</td></tr>`).join('') + '</tbody>';
     $('#tbl-calib').innerHTML = '<thead><tr><th>信心區間</th><th class="r">樣本數</th><th class="r">平均信心</th><th class="r">實際命中率</th></tr></thead><tbody>'
       + (rv.buckets.length ? rv.buckets.map((b) => `<tr><td>${esc(b.range)}</td><td class="r">${b.n.toLocaleString()}</td><td class="r">${b.avg_conf}</td><td class="r"><b>${b.hit}%</b></td></tr>`).join('') : '<tr><td colspan="4" class="hint">樣本不足</td></tr>') + '</tbody>';
     $('#tbl-rv').innerHTML = '<thead><tr><th>預測日</th><th>狀態</th><th class="r">相對命中</th><th class="r">前 10 名</th><th class="r">股票池</th><th class="r">超額</th><th class="r">大盤預測／實際</th></tr></thead><tbody>'
@@ -488,7 +498,7 @@
 
   /* ── 模型說明 ─────────────────────────────────────────────────────── */
   function renderMethod() {
-    const L = LATEST, m = L.model, bt = m.backtest, fs = m.factors;
+    const L = LATEST, m = L.model, bt = m.backtest, fs = m.factors, C_RECENT = 120;
     const mx = Math.max(...fs.map((f) => Math.abs(f.coef || 0)));
     const flag = { with: '<span class="chip">近期有效</span>', against: '<span class="chip" style="color:var(--warn)">近期失靈</span>', flat: '', excluded: '' };
     const sgn = (v, nd) => (v == null ? '–' : `${v > 0 ? '+' : ''}${v.toFixed(nd)}`);
@@ -508,10 +518,11 @@
         <li><b>疊加因子（無完整回測，小權重、依復盤自動調整）</b>：新聞情緒 ×${w.news.weight}、法人與融資籌碼 ×${w.chips.weight}、基本面品質與成長 ×${w.fund?.weight ?? 1}、K 線型態 ×${w.pattern?.weight ?? 1}。</li>
         <li><b>三位大師</b>：葛拉漢（防禦型價值 7 項）、巴菲特（品質護城河 7 項）、林區（合理價成長 6 項＋六種股票分類），依最新財報、月營收與估值逐項檢核。分數顯示在個股與選股雷達，品質與成長部分以小權重進入排名。</li>
         <li><b>K 線型態</b>：28 種型態與技術訊號，每種都以近三年股票池的歷史表現檢驗；統計不明確的型態只顯示、不參與預測。</li>
-        <li><b>信心值</b>：回測中同等強度的訊號，15 日後實際贏過股票池中位數的比例，基準 50。</li>
+        <li><b>信心值</b>：贏過股票池中位數的機率。每天只用「當時已過完 15 天」的資料校準，並依近 ${C_RECENT} 天信心最高 10% 訊號的實際命中率自動縮放（目前係數 ${bt.reliability}）。實測個股的這個機率大多只在 50–53% 之間，所以信心值刻意保守；更有用的是「同排名歷史」——排名越前的股票，歷史平均超額報酬越高。</li>
+        <li><b>大盤</b>：預期報酬＝長期年化 8% 換算的 15 日漂移＋新聞＋美股隔夜；上漲機率＝歷史上 15 日後上漲的頻率。大盤因子（動能、乖離、RSI、VIX…）回測中與實際走勢負相關，趨勢濾網（季線下不給漂移）回測也更差，所以都不計入，只列數值參考。</li>
         <li><b>建議等級</b>：相對強度前 5% 強力看多、前 20% 偏多，後 20% 偏空、後 5% 強力看空；與絕對預期方向相反時降一級。</li>
       </ul>
-      <h3>一年滾動回測（樣本外）</h3>
+      <h3>滾動回測（樣本外）</h3>
       <ul><li>${bt.from} ～ ${bt.to}，${bt.days} 個交易日、${bt.samples.toLocaleString()} 筆預測。</li>
         <li>排序相關 IC ${bt.ic}（前半 ${bt.ic_h1}、後半 ${bt.ic_h2}），${bt.ic_pos_days}% 的日子為正；相對強弱命中率 ${bt.rel_hit}%。</li>
         <li>前 10 名 15 日平均 ${pct(bt.top_ret)}、後 10 名 ${pct(bt.bot_ret)}、股票池 ${pct(bt.uni_ret)}；前 10 名 ${bt.top_win}% 的日子勝出。</li></ul>
