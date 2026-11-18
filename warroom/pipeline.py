@@ -16,7 +16,8 @@ import numpy as np
 import pandas as pd
 
 from . import config as C
-from . import explain, features, model, news as newsmod, review, sources, usmkt
+from . import chips as chipmod, explain, features, fundamentals as fundmod, model, news as newsmod
+from . import patterns as patmod, review, sources, usmkt
 
 log = logging.getLogger("warroom")
 
@@ -109,28 +110,6 @@ def load_prices(now: datetime):
     return uni, wide, tw, us_raw, asof
 
 
-def chip_scores(chips: pd.DataFrame, volume: pd.DataFrame, codes: list[str]):
-    """近 5 日「外資 + 1.5×投信」買賣超占成交量的比例，橫斷面標準化。"""
-    if chips.empty:
-        return pd.Series(0.0, index=codes), {}, 0
-    days = sorted(chips["date"].unique())
-    last5 = chips[chips["date"].isin(days[-5:])].groupby("code")[["foreign", "trust", "dealer"]].sum()
-    v20 = volume.iloc[-20:].mean()
-    raw = ((last5["foreign"] + 1.5 * last5["trust"]) / (v20 * min(len(days), 5))).reindex(codes)
-    z = ((raw - raw.mean()) / raw.std()).clip(-3, 3).fillna(0.0) if len(days) >= 3 and raw.std() > 0 else pd.Series(0.0, index=codes)
-    detail = {}
-    sub = chips[chips["code"].isin(codes) & chips["date"].isin(days[-10:])]
-    for code, g in sub.groupby("code"):
-        g = g.sort_values("date")
-        detail[code] = {
-            "days": [[f"{d:%m-%d}", int(f / 1000), int(t / 1000), int(dl / 1000)]
-                     for d, f, t, dl in zip(g["date"], g["foreign"], g["trust"], g["dealer"])],
-            "f5": int(last5["foreign"].get(code, 0) / 1000), "t5": int(last5["trust"].get(code, 0) / 1000),
-            "d5": int(last5["dealer"].get(code, 0) / 1000),
-        }
-    return z, detail, len(days)
-
-
 def run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     warnings.filterwarnings("ignore", category=RuntimeWarning)      # 缺值日的平均／對數警告，計算上已處理
@@ -144,9 +123,22 @@ def run() -> None:
     asof_s = f"{asof:%Y-%m-%d}"
     log.info("資料基準日 %s，%d 檔股票，%d 個交易日", asof_s, len(codes), len(adj))
 
+    # ── 估值歷史（本益比、淨值比、殖利率）──
+    val = fundmod.load_valuation(adj.index, codes)
+    log.info("估值歷史：%d 個快照", val["n_snapshots"])
+
     # ── 因子與模型 ──
-    F = features.compute(adj, wide["open"] * ratio, wide["high"] * ratio, wide["low"] * ratio, wide["volume"],
-                         wide["volume"] * close)
+    o_a, h_a, l_a = wide["open"] * ratio, wide["high"] * ratio, wide["low"] * ratio
+    F = features.compute(adj, o_a, h_a, l_a, wide["volume"], wide["volume"] * close)
+    for k, x in fundmod.value_factors(val, close).items():
+        if k not in C.VALUE_FACTORS:
+            continue
+        cover = x.iloc[-C.TRAIN_WINDOW:].notna().mean().mean()
+        if cover < 0.5:
+            log.warning("估值因子 %s 歷史覆蓋率只有 %.0f%%，本次以中性值代替", k, cover * 100)
+            x = x * 0.0
+        # 缺值（例如 ETF、新上市）以當天的中位數代替 → 標準化後為 0，不影響排名
+        F[k] = x.T.fillna(x.median(axis=1)).T.where(adj.notna())
     breadth = (adj > F["_ma20"]).sum(axis=1) / adj.notna().sum(axis=1)
     us_aligned = {s: usmkt.align_prev(df["close"], adj.index) for s, df in us_raw.items()}
     M = features.market_features(taiex, breadth, us_aligned)
@@ -155,6 +147,10 @@ def run() -> None:
     live = model.fit_live(panel)
     log.info("回測：相對強弱命中率 %s%%，IC %s（前半 %s / 後半 %s），前 %d 名 %s%% vs 股票池 %s%%", bt.stats["rel_hit"],
              bt.stats["ic"], bt.stats["ic_h1"], bt.stats["ic_h2"], C.TOP_N, bt.stats["top_ret"], bt.stats["uni_ret"])
+
+    # ── K 線型態與歷史統計 ──
+    sig = patmod.detect(o_a, h_a, l_a, adj, wide["volume"], close, F["_k"], F["_d"], F["macd"])
+    pstats = patmod.event_stats(sig, panel.fwd[C.HORIZON])
 
     # ── 首次執行：用樣本外回測補齊最近幾天的歷史預測，讓復盤一開始就有東西可看 ──
     H = C.HORIZON
@@ -185,14 +181,39 @@ def run() -> None:
         nz = {"news": [], "stock_sent": {}, "market_sent": 0.0, "counts": {"total": 0, "pos": 0, "neg": 0}}
     mkt_news_adj = C.MARKET_NEWS_MAX * math.tanh(2 * nz["market_sent"]) * weights["news"]["weight"]
 
-    # ── 籌碼 ──
+    # ── 籌碼：三大法人＋融資融券 ──
     try:
         chips = sources.load_chips(list(adj.index[-20:]))
     except Exception as e:
         log.warning("籌碼資料失敗：%s", e)
         chips = pd.DataFrame(columns=["date", "code", "foreign", "trust", "dealer"])
-    chip_z, chip_detail, chip_days = chip_scores(chips, wide["volume"], codes)
+    try:
+        margin = sources.load_margin(list(adj.index[-20:]))
+    except Exception as e:
+        log.warning("融資融券資料失敗：%s", e)
+        margin = pd.DataFrame(columns=["date", "code", "margin", "short"])
+    chip_z, chip_detail, chip_days, margin_days = chipmod.scores(chips, margin, wide["volume"], codes)
     flows = sources.fetch_market_flows()
+
+    # ── 基本面與風險提示 ──
+    try:
+        fin = fundmod.fetch_financials()
+    except Exception as e:
+        log.warning("財報資料失敗：%s", e)
+        fin = {}
+    try:
+        alerts = sources.fetch_alerts()
+    except Exception as e:
+        log.warning("公告／風險提示資料失敗：%s", e)
+        alerts = {}
+    lag = min(250, len(adj) - 1)
+    fund = {}
+    for c in codes:
+        vn = tuple(None if not np.isfinite(val[k][c].iloc[-1]) else float(val[k][c].iloc[-1]) for k in ("pe", "pb", "dy"))
+        listed_prev = bool(val["listed"][c].iloc[-1 - lag])
+        vp = tuple(None if not np.isfinite(val[k][c].iloc[-1 - lag]) else float(val[k][c].iloc[-1 - lag]) for k in ("pe", "pb", "dy")) if listed_prev else None
+        fund[c] = fundmod.metrics(c, float(close[c].iloc[-1]), fin.get(c), vn, vp, float(close[c].iloc[-1 - lag]), uni.industry[c])
+    fund_comp = fundmod.composite(fund)
 
     # ── 美股 ──
     us = usmkt.analyse(us_raw, taiex, adj, {"2330": float(close["2330"].iloc[-1])} if "2330" in close else {})
@@ -209,8 +230,8 @@ def run() -> None:
     for col, c in sorted(zip(mm.cols, mm.parts(row)), key=lambda x: -abs(x[1])):
         if abs(c) >= 0.0005:
             v = row[col]
-            val = f"{v:.1f}" if col in ("m_rsi", "u_vix") else f"{v * 100:+.1f}%"
-            mkt_parts.append({"label": features.MARKET_FACTORS[col], "contrib": _pct(c), "text": f"目前數值 {val}"})
+            vtxt = f"{v:.1f}" if col in ("m_rsi", "u_vix") else f"{v * 100:+.1f}%"
+            mkt_parts.append({"label": features.MARKET_FACTORS[col], "contrib": _pct(c), "text": f"目前數值 {vtxt}"})
     if abs(mkt_news_adj) >= 0.0003:
         mkt_parts.append({"label": "新聞情緒", "contrib": _pct(mkt_news_adj),
                           "text": f"市場相關新聞加權情緒 {nz['market_sent']:+.2f}（−1 極負面 ~ +1 極正面）"})
@@ -238,17 +259,21 @@ def run() -> None:
         # 疊加因子以「相對強度分數的離散度」為單位，和技術面分數相加後一起排名
         news_z = C.OVERLAY_SCALE["news"] * alpha_sd * math.tanh(2.5 * ns["score"]) * weights["news"]["weight"] if ns else 0.0
         chips_z = C.OVERLAY_SCALE["chips"] * alpha_sd * float(np.clip(chip_z[c] / 2, -1, 1)) * weights["chips"]["weight"]
-        news_adj, chips_adj = news_z * sd15, chips_z * sd15
+        fund_z = C.OVERLAY_SCALE["fund"] * alpha_sd * math.tanh(float(fund_comp[c]) / 1.5) * weights["fund"]["weight"]
+        recent = patmod.recent(sig, c, adj.index, C.PATTERN_LOOKBACK)
+        pat_raw = sum(pstats[k]["shrunk"] * C.PATTERN_DECAY[i] for k, i in recent)
+        pattern_z = C.OVERLAY_SCALE["pattern"] * alpha_sd * math.tanh(pat_raw / 0.02) * weights["pattern"]["weight"]
+        news_adj, chips_adj, fund_adj, pattern_adj = news_z * sd15, chips_z * sd15, fund_z * sd15, pattern_z * sd15
         us_adj = us["stock_adj"].get(c, 0.0)
         b = float(beta[c])
         a_ret = {h: float(live.alpha[h][j]) * sd * math.sqrt(h) for h in C.HORIZONS}
-        mus = {h: b * (live.mkt_mu[h] + mkt_news_adj * h / H) + a_ret[h]
-               + (news_adj + chips_adj) * h / H + us_adj for h in C.HORIZONS}
-        score[c] = float(live.alpha[H][j]) + news_z + chips_z
+        ovl = news_adj + chips_adj + fund_adj + pattern_adj
+        mus = {h: b * (live.mkt_mu[h] + mkt_news_adj * h / H) + a_ret[h] + ovl * h / H + us_adj for h in C.HORIZONS}
+        score[c] = float(live.alpha[H][j]) + news_z + chips_z + fund_z + pattern_z
         p_win = float(model.prob_win(score[c], bt.slope))
         conf = max(p_win, 1 - p_win) * 100
         parts = {"market": b * (live.mkt_mu[H] + mkt_news_adj), "alpha": a_ret[H],
-                 "news": news_adj, "chips": chips_adj, "us": us_adj}
+                 "news": news_adj, "chips": chips_adj, "fund": fund_adj, "pattern": pattern_adj, "us": us_adj}
         px = float(close[c].iloc[-1])
         x = {"close": px, "ma20": float(F["_ma20"][c].iloc[-1] / ratio[c].iloc[-1]),
              "ma60": float(F["_ma60"][c].iloc[-1] / ratio[c].iloc[-1]), "rsi": float(raw_last["rsi"][c]),
@@ -261,9 +286,31 @@ def run() -> None:
                                           dict(zip(features.FACTOR_KEYS, live.contrib[j] * sd15)), coef15)
         cd = chip_detail.get(c)
         if cd and abs(chips_adj) >= 0.0003:
-            reasons.append({"group": "籌碼", "label": "法人籌碼", "value": f"外資 {cd['f5']:+,} 張", "contrib": _pct(chips_adj),
-                            "text": f"近 5 日外資 {cd['f5']:+,} 張、投信 {cd['t5']:+,} 張、自營商 {cd['d5']:+,} 張；"
-                                    f"占成交量比重在股票池中排名{'偏前（買超相對積極）' if chip_z[c] > 0 else '偏後（賣超相對明顯）'}"})
+            reasons.append({"group": "籌碼", "label": "法人與融資籌碼", "short": "籌碼",
+                            "value": f"外資 {cd['f5']:+,} 張" if "f5" in cd else "融資", "contrib": _pct(chips_adj),
+                            "text": chipmod.describe(cd, float(chip_z[c]))})
+        fm = fund[c]
+        if abs(fund_adj) >= 0.0003:
+            bits = [f"ROE {fm['roe']:.1f}%" if fm["roe"] is not None else None,
+                    f"毛利率 {fm['gm']:.1f}%" if fm["gm"] is not None else None,
+                    f"累計營收年增 {fm['rev_cum_yoy']:+.1f}%" if fm["rev_cum_yoy"] is not None else None,
+                    f"近四季 EPS 年增 {fm['eps_g']:+.1f}%" if fm["eps_g"] is not None else None]
+            reasons.append({"group": "基本面", "label": "基本面品質與成長", "short": "基本面",
+                            "value": f"巴菲特 {fm['buffett']['score']}" if fm["buffett"]["score"] is not None else "–",
+                            "contrib": _pct(fund_adj),
+                            "text": "、".join(x for x in bits if x) + f"；品質與成長綜合排名{'偏前' if fund_comp[c] > 0 else '偏後'}"})
+        pat_list = []
+        for k, i in recent:
+            nm, dirn, desc = patmod.PATTERNS[k]
+            st = pstats[k]
+            pat_list.append({"key": k, "name": nm, "dir": dirn, "ago": i, "date": f"{adj.index[-1 - i]:%m-%d}", "desc": desc,
+                             "n": st["n"], "mean": st["mean"], "win": st["win"], "t": st["t"], "verdict": patmod.verdict(st, dirn)})
+        if abs(pattern_adj) >= 0.0003:
+            reasons.append({"group": "K線", "label": "K 線型態", "short": "K線",
+                            "value": "、".join(p["name"] for p in pat_list[:2]), "contrib": _pct(pattern_adj),
+                            "text": "；".join(f"{p['name']}（{'今天' if p['ago'] == 0 else str(p['ago']) + ' 天前'}）歷史上出現後 15 日平均超額 "
+                                             f"{p['mean']:+.2f}%（t 值 {p['t']}）" for p in pat_list if pstats[p["key"]]["shrunk"] != 0)
+                                    + "。統計不明確的型態不列入"})
         if ns and abs(news_adj) >= 0.0003:
             reasons.append({"group": "新聞", "label": "新聞情緒", "value": f"{ns['n']} 則", "contrib": _pct(news_adj),
                             "text": f"近 {hours} 小時有 {ns['n']} 則相關新聞，加權情緒 {ns['score']:+.2f}；代表新聞：{ns['items'][0]['title']}"})
@@ -289,10 +336,13 @@ def run() -> None:
                            "vol_ann": _pct(sd * math.sqrt(252), 1), "mom5": _pct(raw_last["mom5"][c]),
                            "mom20": _pct(raw_last["mom20"][c]), "mom60": _pct(raw_last["mom60"][c])},
             "signals": explain.signals(x), "reasons": reasons, "chips": cd,
+            "fund": {**fm, "rev_hist": fundmod.revenue_history(c)}, "patterns": pat_list,
+            "alerts": alerts.get(c, {}),
             "news": ns["items"] if ns else [], "news_score": ns["score"] if ns else None,
             "us": {"beta": us["beta_us"].get(c), "adj": _pct(us_adj)},
         }
-        pred_store[c] = [round(mus[H], 5), round(p_win, 4), round(news_adj, 5), round(chips_adj, 5), round(us_adj, 5)]
+        pred_store[c] = [round(mus[H], 5), round(p_win, 4), round(news_adj, 5), round(chips_adj, 5), round(us_adj, 5),
+                         round(fund_adj, 5), round(pattern_adj, 5)]
         stocks[c]["_m"] = (mus[H], conf, parts)
 
     # 依相對強度分數排名，再決定建議等級
@@ -327,14 +377,23 @@ def run() -> None:
     for c in movers[:14]:
         s = stocks[c]
         rel = float(chg1[c]) - float(beta[c]) * mkt_chg
+        mat = (alerts.get(c) or {}).get("material") or []
         if s["news"]:
             cause = f"找到 {len(s['news'])} 則相關新聞（情緒 {s['news_score']:+.2f}），列於下方。"
+        elif mat:
+            cause = f"公司近日發布重大訊息：{mat[0]['subject'][:60]}"
         elif abs(mkt_chg) >= C.BIG_MOVE_MARKET_PCT and abs(rel) < 0.03:
             cause = f"沒有個股專屬新聞；跌幅與大盤 × β（{float(beta[c]):.2f}）相當，判斷為跟隨大盤的系統性波動。"
         else:
             cause = "未找到直接相關新聞，可能是族群連動、籌碼或技術面因素。"
         events.append({"type": "stock", "code": c, "name": s["name"], "industry": s["industry"], "chg": s["chg"],
                        "excess": _pct(rel), "cause": cause, "news": s["news"][:3]})
+
+    # ── 股票池內的公告與風險提示彙整 ──
+    alert_rank = {"punish": 0, "notice": 1, "insider": 2, "exdiv": 3, "material": 4}
+    alert_list = [{"code": c, "name": names[c], **{("label" if kk == "type" else kk): vv for kk, vv in it.items()}, "type": k}
+                  for c in codes for k in alert_rank for it in ((alerts.get(c) or {}).get(k) or [])[:2]]
+    alert_list.sort(key=lambda x: (alert_rank[x["type"]], x.get("date") or "", x["code"]))
 
     major = [{**n, "why": newsmod.explain(n), "names": [names[c] for c in n["stocks"][:6]],
               "tone": "利多" if n["sent"] > 0.15 else "利空" if n["sent"] < -0.15 else "中性"} for n in nz["news"][:14]]
@@ -356,7 +415,18 @@ def run() -> None:
         diag.append({"key": k, "name": features.FACTORS[k][0], "group": features.FACTORS[k][1], "coef": round(cf, 4),
                      "prev": round(float(live.prev_coef[k_i]), 4) if live.prev_coef is not None else None,
                      "ic": round(ic, 3), "flag": flag})
-    diag_sorted = sorted(diag, key=lambda d: -abs(d["ic"]))
+    # 估值因子：沒放進模型，但每天檢驗它們的預測力，轉為有效時可在 config.py 開啟
+    bt_rows = [t for t in bt.idx if t <= last - H]
+    for k, x in fundmod.value_factors(val, close).items():
+        if k in C.VALUE_FACTORS:
+            continue
+        x = x.T.fillna(x.median(axis=1)).T.where(adj.notna())
+        ic_all = model.factor_ics(panel, x, bt_rows)
+        ic_30 = ic_all[-30:]
+        diag.append({"key": k, "name": features.VALUE_FACTORS[k][0], "group": "估值（未納入模型）", "coef": None, "prev": None,
+                     "ic": round(float(np.nanmean(ic_30)), 3) if np.isfinite(ic_30).any() else 0.0,
+                     "ic_year": round(float(np.nanmean(ic_all)), 3) if np.isfinite(ic_all).any() else 0.0, "flag": "excluded"})
+    diag_sorted = sorted([d for d in diag if d["coef"] is not None], key=lambda d: -abs(d["ic"]))
 
     # ── 存檔今日預測並復盤 ──
     review.save_prediction(asof_s, {
@@ -378,17 +448,29 @@ def run() -> None:
         shutil.rmtree(C.SITE_DATA_DIR / "stocks")
     for c in codes:
         _write(C.SITE_DATA_DIR / "stocks" / f"{c}.json", stocks[c])
-    _write(C.SITE_DATA_DIR / "index.json", [
-        {"c": c, "n": s["name"], "i": s["industry"], "px": s["close"], "chg": s["chg"], "mu": s["forecast"]["mu"][str(H)],
-         "conf": s["forecast"]["conf"], "p": s["forecast"]["p_win"], "a": s["forecast"]["action"], "r": s["rank"]}
-        for c, s in ((c, stocks[c]) for c in order)])
+    def idx_row(c: str) -> dict:
+        s, f, cd, al = stocks[c], fund[c], chip_detail.get(c, {}), alerts.get(c, {})
+        return {"c": c, "n": s["name"], "i": s["industry"], "m": s["market"], "px": s["close"], "chg": s["chg"],
+                "mu": s["forecast"]["mu"][str(H)], "conf": s["forecast"]["conf"], "p": s["forecast"]["p_win"],
+                "a": s["forecast"]["action"], "r": s["rank"],
+                "pe": f["pe"], "pb": f["pb"], "dy": f["dy"], "roe": f["roe"], "gm": f["gm"], "debt": f["debt"],
+                "rev": f["rev_cum_yoy"], "revm": f["rev_yoy"], "epsg": f["eps_g"], "peg": f["peg"], "mos": f["mos"],
+                "gs": f["graham"]["score"], "gv": f["graham_price_ok"], "bs": f["buffett"]["score"], "ls": f["lynch"]["score"], "lc": f["lynch"]["category"],
+                "f5": cd.get("f5"), "t5": cd.get("t5"), "fs": cd.get("f_streak"), "ts": cd.get("t_streak"),
+                "mc": cd.get("margin_chg_pct"), "sr": cd.get("short_ratio"),
+                "pt": [[p["key"], p["ago"]] for p in s["patterns"]],
+                "al": [k for k in ("punish", "notice", "exdiv", "insider", "material") if al.get(k)],
+                "exd": (al.get("exdiv") or [{}])[0].get("date"), "vol": s["indicators"]["vol_ann"]}
+
+    _write(C.SITE_DATA_DIR / "index.json", [idx_row(c) for c in order])
     _write(C.SITE_DATA_DIR / "review.json", rv)
     tail = slice(-130, None)
     m_mus = {h: mkt_mu[h] for h in C.HORIZONS}
     _write(C.SITE_DATA_DIR / "latest.json", {
         "meta": {"generated_at": now.strftime("%Y-%m-%d %H:%M"), "asof": asof_s, "edition": edition,
                  "next_session": f"{sources.next_trading_day(asof):%Y-%m-%d}", "universe": len(codes), "horizon": H,
-                 "news_hours": hours, "chip_days": chip_days, "us_available": us["available"]},
+                 "news_hours": hours, "chip_days": chip_days, "margin_days": margin_days, "us_available": us["available"],
+                 "valuation_snapshots": val["n_snapshots"], "fin_companies": len(fin)},
         "market": {
             "close": round(float(taiex.iloc[-1]), 2), "chg": _pct(mkt_chg),
             "ohlc": [[f"{d:%Y-%m-%d}", round(o, 2), round(cl, 2), round(lo, 2), round(hi, 2)] for d, o, cl, lo, hi in
@@ -405,10 +487,14 @@ def run() -> None:
         "us": {k: us[k] for k in ("panel", "available", "impact", "note", "model", "adr") } | {"impact": _pct(us["impact"]), "moves": us.get("moves")},
         "top_bull": [brief(c) for c in order[: C.TOP_N]],
         "top_bear": [brief(c) for c in order[::-1][: C.TOP_N]],
-        "events": events, "major_news": major,
+        "events": events, "major_news": major, "alerts": alert_list[:200],
         "news": {"market_sent": nz["market_sent"], **nz["counts"], "hours": hours},
         "sectors": sectors,
-        "model": {"train_days": C.TRAIN_WINDOW, "factors": diag, "backtest": bt.stats,
+        "pattern_stats": [{"key": k, "name": nm, "dir": dirn, "desc": desc, **{kk: v for kk, v in pstats[k].items() if kk != "shrunk"},
+                           "verdict": patmod.verdict(pstats[k], dirn), "today": int(sig[k].iloc[-1].sum()),
+                           "used": pstats[k]["shrunk"] != 0}
+                          for k, (nm, dirn, desc) in patmod.PATTERNS.items()],
+        "model": {"train_days": C.TRAIN_WINDOW, "factors": diag, "value_factors": list(C.VALUE_FACTORS), "backtest": bt.stats,
                   "calibrated": bt.slope > 0, "weights": weights, "hiconf": C.HICONF},
     })
     log.info("完成：%s %s｜大盤 15 日預期 %+.2f%%（上漲機率 %.0f%%）｜看好第一名 %s %s",

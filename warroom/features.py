@@ -4,6 +4,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from . import config as C
+
 # 模型使用的因子：鍵 → (中文名稱, 分類, 簡稱)
 FACTORS = {
     "rev1": ("單日漲跌（短線反轉）", "動能", "單日漲跌"),
@@ -25,6 +27,14 @@ FACTORS = {
     "hi250": ("距一年高點", "位置", "一年高點"),
     "intraday": ("近 20 日盤中累計漲幅（收盤相對開盤）", "動能", "盤中動能"),
 }
+# 估值因子：資料來自證交所／櫃買中心每 20 個交易日的本益比、淨值比、殖利率歷史，可以和技術因子一起回測
+VALUE_FACTORS = {
+    "ey": ("盈餘殖利率（1 ÷ 本益比，越高越便宜）", "估值", "本益比"),
+    "bp": ("淨值股價比（1 ÷ 淨值比，越高越便宜）", "估值", "淨值比"),
+    "dy": ("現金殖利率", "估值", "殖利率"),
+    "dey": ("近一年 EPS 變化 ÷ 股價", "成長", "盈餘成長"),
+}
+FACTORS.update({k: VALUE_FACTORS[k] for k in C.VALUE_FACTORS})
 FACTOR_KEYS = list(FACTORS)
 
 

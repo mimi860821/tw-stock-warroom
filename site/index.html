@@ -4,104 +4,122 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>台股戰情室</title>
-<meta name="description" content="每日自動更新的台股分析：15 日預測、看好名單、美股連動、重大新聞與復盤驗證">
+<meta name="description" content="每日自動更新的台股戰情中心：15 日預測、看好名單、個股查詢、基本面與大師評分、K 線型態、籌碼、美股連動、重大新聞與復盤驗證">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="top">
-  <div class="brand">
-    <h1>台股戰情室</h1>
-    <span id="edition" class="pill"></span>
+<header class="hdr">
+  <div class="brand"><h1>台股戰情室</h1><span id="edition" class="pill"></span></div>
+  <nav class="tabs" id="tabs" role="tablist">
+    <button role="tab" data-tab="dash" class="on">戰情總覽</button>
+    <button role="tab" data-tab="radar">選股雷達</button>
+    <button role="tab" data-tab="market">大盤與美股</button>
+    <button role="tab" data-tab="news">新聞與公告</button>
+    <button role="tab" data-tab="review">復盤驗證</button>
+    <button role="tab" data-tab="method">模型說明</button>
+  </nav>
+  <div class="search">
+    <input id="q" type="search" placeholder="查詢個股：代號或名稱" autocomplete="off" aria-label="查詢個股">
+    <div id="suggest" class="suggest" hidden></div>
   </div>
   <div id="stamp" class="stamp">載入中…</div>
-  <nav>
-    <a href="#overview">總覽</a><a href="#us">美股</a><a href="#picks">看好名單</a><a href="#lookup">個股查詢</a>
-    <a href="#news">重大新聞</a><a href="#review">復盤驗證</a><a href="#model">模型說明</a>
-  </nav>
 </header>
+<div class="ticker" id="ticker"></div>
+<div id="error" class="error" hidden></div>
 
 <main>
-  <div id="error" class="error" hidden></div>
-
-  <section id="overview">
-    <h2>大盤總覽與 15 日預測</h2>
-    <div class="grid g-overview">
-      <div class="card" id="mkt-tiles"></div>
-      <div class="card">
-        <div class="card-h"><h3>加權指數與未來 15 個交易日預期路徑</h3>
-          <div class="legend"><span><i class="key line c-price"></i>收盤</span><span><i class="key dash"></i>預期中位</span><span><i class="key band"></i>68% 可能區間</span></div></div>
-        <div id="mkt-chart" class="chart"></div>
+  <!-- 戰情總覽：名單 ｜ 個股 ｜ 大盤與新聞 -->
+  <section class="view on" id="v-dash">
+    <aside class="panel p-list">
+      <div class="ph">
+        <div class="seg" id="list-seg">
+          <button data-k="bull" class="on">看好</button><button data-k="bear">看淡</button><button data-k="master">大師精選</button><button data-k="all">全部</button>
+        </div>
+        <select id="list-ind" aria-label="產業篩選"><option value="">全部產業</option></select>
       </div>
-    </div>
-    <div class="grid g2">
-      <div class="card"><h3>大盤判斷依據</h3><p class="hint">各項依據對「未來 15 日預期報酬」的貢獻，加總即為預測值。</p><div id="mkt-parts"></div></div>
-      <div class="card"><h3>市場體溫</h3><div id="mkt-health"></div></div>
-    </div>
-  </section>
+      <p class="hint" id="list-hint"></p>
+      <div class="pb" id="list"></div>
+    </aside>
 
-  <section id="us">
-    <h2>前一晚美股與連動判斷</h2>
-    <div class="card"><p id="us-note" class="lead"></p><div id="us-tiles" class="tiles"></div><p id="us-model" class="hint"></p></div>
-  </section>
-
-  <section id="picks">
-    <h2>看好與看淡名單</h2>
-    <p class="hint">依「相對強度」排名：同樣風險下，預期未來 15 個交易日比其他股票強或弱。信心值＝回測中同等強度的訊號，實際贏過（看淡則為落後）股票池中位數的比例，基準是 50。點任一列看完整分析。</p>
-    <div class="grid g2">
-      <div class="card"><h3 class="up">▲ 看好前 10 名</h3><div class="tablewrap"><table id="tbl-bull" class="tbl"></table></div></div>
-      <div class="card"><h3 class="dn">▼ 看淡前 10 名</h3><div class="tablewrap"><table id="tbl-bear" class="tbl"></table></div></div>
-    </div>
-    <div class="card"><h3>產業彙整</h3><p class="hint">股票池內各產業的當日平均漲跌與平均 15 日預期報酬（至少 3 檔才列出）。</p><div class="tablewrap"><table id="tbl-sector" class="tbl"></table></div></div>
-  </section>
-
-  <section id="lookup">
-    <h2>個股查詢</h2>
-    <div class="card">
-      <div class="search">
-        <input id="q" type="search" placeholder="輸入股票代號或名稱，例如 2330 或 台積電" autocomplete="off" aria-label="搜尋個股">
-        <div id="suggest" class="suggest" hidden></div>
+    <section class="panel p-stock" id="stock-panel">
+      <div id="stock-head" class="stock-head"></div>
+      <div class="chart-wrap">
+        <div class="legend" id="stock-legend"><span><i class="key candle-up"></i>收紅</span><span><i class="key candle-dn"></i>收黑</span><span><i class="key line"></i>MA20</span><span><i class="key line c-ma60"></i>MA60</span><span><i class="key dash"></i>預期中位</span><span><i class="key band"></i>68% 區間</span></div>
+        <div id="stock-chart" class="chart"></div>
       </div>
-      <p class="hint" id="universe-note"></p>
-      <div id="stock"></div>
-    </div>
-    <details class="card">
-      <summary>全部個股排名（可排序）</summary>
-      <div class="tablewrap tall"><table id="tbl-all" class="tbl"></table></div>
-    </details>
+      <div class="seg seg-line" id="stock-seg">
+        <button data-k="why" class="on">判斷依據</button><button data-k="tech">技術與 K 線</button><button data-k="fund">基本面・大師</button><button data-k="chips">籌碼</button><button data-k="news">新聞公告</button>
+      </div>
+      <div class="pb" id="stock-tab"></div>
+    </section>
+
+    <aside class="panel p-side">
+      <div id="side-mkt"></div>
+      <div class="seg seg-line" id="side-seg">
+        <button data-k="major" class="on">重大新聞</button><button data-k="events">大波動</button><button data-k="sectors">產業</button><button data-k="alerts">風險公告</button>
+      </div>
+      <div class="pb" id="side-feed"></div>
+    </aside>
   </section>
 
-  <section id="news">
-    <h2>大波動事件與重大新聞</h2>
-    <div class="grid g2">
-      <div class="card"><h3>大波動事件與可能原因</h3><p class="hint">大盤單日漲跌超過 2%、個股超過 6% 時列出，並比對同時段新聞。</p><div id="events"></div></div>
-      <div class="card"><h3>重大新聞（依衝擊分數排序）</h3><p class="hint" id="news-meta"></p><div id="major"></div></div>
-    </div>
+  <!-- 選股雷達 -->
+  <section class="view" id="v-radar">
+    <aside class="panel p-screens">
+      <div class="ph"><h3>選股條件</h3></div>
+      <div class="pb" id="screens"></div>
+    </aside>
+    <section class="panel">
+      <div class="ph ph-col"><h3 id="screen-title"></h3><p class="hint" id="screen-desc"></p></div>
+      <div class="pb"><table class="tbl" id="screen-tbl"></table></div>
+    </section>
   </section>
 
-  <section id="review">
-    <h2>復盤驗證</h2>
-    <div class="card"><div id="rv-tiles" class="tiles"></div></div>
-    <div class="grid g2">
-      <div class="card"><div class="card-h"><h3>看好前 10 名相對股票池的超額報酬（百分點）</h3><div class="legend"><span><i class="key box solid"></i>實際發布</span><span><i class="key box faded"></i>回測補齊</span></div></div><div id="rv-excess" class="chart sm"></div></div>
-      <div class="card"><h3>相對強弱命中率（%，基準 50）</h3><div id="rv-hit" class="chart sm"></div></div>
-    </div>
-    <div class="grid g2">
-      <div class="card"><h3>改進建議</h3><div id="rv-sugg"></div></div>
-      <div class="card"><h3>信心值校準</h3><p class="hint">信心值若準確，「實際命中率」應該接近「平均信心」，且信心越高命中率越高。</p><div class="tablewrap"><table id="tbl-calib" class="tbl"></table></div>
-        <h3 style="margin-top:20px">逐日明細</h3><div class="tablewrap tall"><table id="tbl-rv" class="tbl"></table></div></div>
-    </div>
+  <!-- 大盤與美股 -->
+  <section class="view" id="v-market">
+    <section class="panel">
+      <div class="ph"><h3>加權指數與未來 15 個交易日預期路徑</h3>
+        <div class="legend"><span><i class="key line"></i>收盤</span><span><i class="key dash"></i>預期中位</span><span><i class="key band"></i>68% 區間</span></div></div>
+      <div id="mkt-chart" class="chart"></div>
+      <div class="ph"><h3>大盤判斷依據</h3></div>
+      <div class="pb" id="mkt-parts"></div>
+    </section>
+    <section class="panel">
+      <div class="ph"><h3>前一晚美股與連動</h3></div>
+      <div class="pb">
+        <p id="us-note" class="lead"></p>
+        <div id="us-tiles" class="tiles"></div>
+        <p id="us-model" class="hint"></p>
+        <h3 class="sub-h">市場體溫</h3>
+        <div id="mkt-health"></div>
+      </div>
+    </section>
   </section>
 
-  <section id="model">
-    <h2>模型說明與判斷依據</h2>
-    <div class="grid g2">
-      <div class="card"><h3>技術因子權重與近期表現</h3><p class="hint">權重＝模型每日重新訓練得到的係數；近期 IC＝該因子最近 30 個已到期交易日與實際結果的相關性。兩者方向相反代表該因子近期失靈。</p><div class="tablewrap"><table id="tbl-factors" class="tbl"></table></div></div>
-      <div class="card prose" id="method"></div>
-    </div>
-    <p class="disclaimer">本站內容由程式自動產生，僅供研究與參考，不構成任何投資建議。模型依據歷史資料統計，無法預知突發事件；過去績效不代表未來表現，投資請自行判斷並承擔風險。</p>
+  <!-- 新聞與公告 -->
+  <section class="view" id="v-news">
+    <section class="panel"><div class="ph ph-col"><h3>大波動事件與可能原因</h3><p class="hint">大盤單日漲跌超過 2%、個股超過 6% 時列出，並比對同時段新聞與公司公告。</p></div><div class="pb" id="events"></div></section>
+    <section class="panel"><div class="ph ph-col"><h3>重大新聞（依衝擊分數排序）</h3><p class="hint" id="news-meta"></p></div><div class="pb" id="major"></div></section>
+    <section class="panel"><div class="ph ph-col"><h3>公司公告與風險提示</h3><p class="hint">處置股、注意股、內部人申報轉讓、除權息、重大訊息（僅列股票池內）。</p></div><div class="pb" id="alerts"></div></section>
+  </section>
+
+  <!-- 復盤驗證 -->
+  <section class="view" id="v-review">
+    <div class="panel span-all"><div id="rv-tiles" class="tiles tiles-row"></div></div>
+    <section class="panel"><div class="ph"><h3>看好前 10 名相對股票池的超額報酬（百分點）</h3><div class="legend"><span><i class="key box solid"></i>實際發布</span><span><i class="key box faded"></i>回測補齊</span></div></div><div id="rv-excess" class="chart sm"></div>
+      <div class="ph"><h3>改進建議</h3></div><div class="pb" id="rv-sugg"></div></section>
+    <section class="panel"><div class="ph"><h3>相對強弱命中率（%，基準 50）</h3></div><div id="rv-hit" class="chart sm"></div>
+      <div class="ph ph-col"><h3>信心值校準與逐日明細</h3></div>
+      <div class="pb"><table id="tbl-calib" class="tbl"></table><table id="tbl-rv" class="tbl" style="margin-top:14px"></table></div></section>
+  </section>
+
+  <!-- 模型說明 -->
+  <section class="view" id="v-method">
+    <section class="panel"><div class="ph ph-col"><h3>模型因子：權重與近期表現</h3><p class="hint">權重＝每日重新訓練的係數；近期 IC＝最近 30 個已到期交易日與實際結果的排序相關。方向相反代表近期失靈。</p></div><div class="pb"><table id="tbl-factors" class="tbl"></table></div></section>
+    <section class="panel"><div class="ph ph-col"><h3>K 線型態歷史統計</h3><p class="hint">近三年股票池內，型態出現後 15 個交易日的表現。只有 |t| &gt; 1 的型態會參與預測，|t| ≥ 3 全額採用。</p></div><div class="pb"><table id="tbl-patterns" class="tbl"></table></div></section>
+    <section class="panel"><div class="pb prose" id="method"></div></section>
   </section>
 </main>
-
+<footer class="foot">本站內容由程式自動產生，僅供研究與參考，不構成任何投資建議。過去績效不代表未來表現。</footer>
 <div id="tip" class="tip" hidden></div>
 <script src="vendor/echarts.min.js"></script>
 <script src="app.js"></script>

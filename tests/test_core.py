@@ -104,3 +104,85 @@ def test_action_grades_by_rank_and_downgrades_on_conflict():
     assert explain.action(50, 100, 0.02) == "neutral"
     assert explain.action(100, 100, -0.03) == "strong_sell"
     assert explain.action(90, 100, 0.01) == "neutral"
+
+
+# ── 新增模組 ────────────────────────────────────────────────────────────
+
+def test_chip_streaks():
+    from warroom import chips
+    assert chips._streak(np.array([-5, 3, 4, 1])) == 3
+    assert chips._streak(np.array([2, -1, -2])) == -2
+    assert chips._streak(np.array([1, 0])) == 0
+
+
+def test_chip_scores_penalise_margin_buildup():
+    from warroom import chips
+    days = pd.bdate_range("2026-11-02", periods=6)
+    codes = ["1111", "2222", "3333"]
+    inst = pd.DataFrame([{"date": d, "code": c, "foreign": 0, "trust": 0, "dealer": 0} for d in days for c in codes])
+    mar = pd.DataFrame([{"date": d, "code": c, "margin": 1000 + (i * 200 if c == "1111" else 0), "short": 10}
+                        for i, d in enumerate(days) for c in codes])
+    vol = pd.DataFrame(1e6, index=days, columns=codes)
+    score, detail, _, n_mar = chips.scores(inst, mar, vol, codes)
+    assert n_mar == 6 and score["1111"] < score["2222"]          # 融資暴增的股票籌碼分數較差
+    assert detail["1111"]["margin_chg"] == 1000
+
+
+def test_patterns_detect_gap_and_limit_up():
+    from warroom import patterns
+    idx = pd.bdate_range("2026-01-01", periods=30)
+    c = pd.DataFrame({"a": np.linspace(100, 101, 30)}, index=idx)
+    o, h, l = c * 0.999, c * 1.005, c * 0.995
+    c.iloc[-1], o.iloc[-1], h.iloc[-1], l.iloc[-1] = 111.0, 109.0, 111.0, 108.5      # 跳空漲停
+    v = pd.DataFrame({"a": [1e6] * 29 + [5e6]}, index=idx)
+    k = d = pd.DataFrame({"a": [50.0] * 30}, index=idx)
+    sig = patterns.detect(o, h, l, c, v, c, k, d, c * 0)
+    assert sig["gap_up"]["a"].iloc[-1] and sig["limit_up"]["a"].iloc[-1] and sig["vol_breakout"]["a"].iloc[-1]
+    assert not sig["gap_down"]["a"].any()
+    assert patterns.recent(sig, "a", idx, 3)[0][1] == 0
+
+
+def test_pattern_stats_shrink_insignificant():
+    from warroom import patterns
+    rng = np.random.default_rng(5)
+    fwd = rng.normal(0, 0.05, (300, 50))
+    hit = pd.DataFrame(rng.random((300, 50)) < 0.05)
+    st = patterns.event_stats({"x": hit}, fwd)["x"]
+    assert st["n"] > 0 and abs(st["t"]) < 3 and abs(st["shrunk"]) <= abs(st["mean"] / 100) + 1e-12
+
+
+def test_master_scorecards_and_graham_number():
+    from warroom import fundamentals as F
+    fin = {"fin_type": "ci", "year": 115, "season": 3, "eps_ytd": 6.0, "ni_parent": 300.0, "equity_parent": 1500.0,
+           "assets": 3000.0, "liab": 900.0, "cur_assets": 800.0, "cur_liab": 300.0, "capital": 1_000_000.0, "bvps": 30.0,
+           "op_income": 380.0, "pretax": 400.0, "gross_margin": 45.0, "op_margin": 25.0, "net_margin": 18.0,
+           "rev_cum_yoy": 25.0, "rev_yoy": 30.0}
+    m = F.metrics("9999", 60.0, fin, (10.0, 2.0, 5.0), (12.0, 2.0, 4.0), 48.0, "電子零組件")
+    assert m["eps_ttm"] == 6.0 and m["roe"] == 26.7 and m["debt"] == 30.0
+    assert abs(m["graham_number"] - (22.5 * 6 * 30) ** 0.5) < 0.1
+    assert m["eps_g"] == 50.0 and m["peg"] == 0.2 and m["lynch"]["category"] == "快速成長股"
+    assert m["buffett"]["score"] == 100
+    # 金融業：沒有流動比率與負債比的檢核
+    mf = F.metrics("2882", 70.0, {}, (13.0, 1.6, 3.0), None, 0.0, "金融保險")
+    assert mf["roe"] == round(1.6 / 13 * 100, 1) and mf["graham"]["items"][1]["pass"] is None
+
+
+def test_value_factors_treat_loss_as_expensive():
+    from warroom import fundamentals as F
+    idx = pd.bdate_range("2025-01-01", periods=260)
+    pe = pd.DataFrame({"a": 10.0, "b": np.nan, "c": np.nan}, index=idx)
+    listed = pd.DataFrame({"a": True, "b": True, "c": False}, index=idx)
+    val = {"pe": pe, "pb": pe / 5, "dy": pe * 0 + 3, "listed": listed}
+    close = pd.DataFrame(100.0, index=idx, columns=["a", "b", "c"])
+    vf = F.value_factors(val, close)
+    assert vf["ey"]["a"].iloc[-1] == 0.1 and vf["ey"]["b"].iloc[-1] == 0.0 and np.isnan(vf["ey"]["c"].iloc[-1])
+
+
+def test_review_handles_old_and_new_prediction_widths():
+    from warroom import review
+    adj, taiex, _ = _prices(n=60, k=30)
+    codes = list(adj.columns)
+    preds = [{"asof": f"{adj.index[30]:%Y-%m-%d}", "kind": "live", "market": {"mu": 0.01, "p_up": 0.55},
+              "stocks": {c: ([0.01, 0.6, 0, 0, 0] if i % 2 else [0.01, 0.4, 0.001, 0, 0, 0.002, -0.001]) for i, c in enumerate(codes)}}]
+    rv = review.evaluate(preds, adj, taiex, {c: c for c in codes})
+    assert rv["rows"][0]["h"] == 15 and set(rv["overlay_ic"]) == set(review.OVERLAY_COLS)

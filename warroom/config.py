@@ -5,7 +5,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"            # 進版控的狀態：歷史預測、籌碼快取、新聞存檔、權重
+DATA_DIR = ROOT / "data"            # 進版控的狀態：歷史預測、籌碼／融資／估值快取、財報、新聞存檔、權重
 SITE_DIR = ROOT / "site"            # 靜態網站原始碼
 SITE_DATA_DIR = SITE_DIR / "data"   # 每次執行產生的 JSON（不進版控，由 CI 部署）
 
@@ -13,8 +13,8 @@ TZ_TW = ZoneInfo("Asia/Taipei")
 TZ_US = ZoneInfo("America/New_York")
 
 # ── 股票池 ────────────────────────────────────────────────────────────────
-UNIVERSE_TWSE = 200          # 上市：依成交金額取前 N 檔
-UNIVERSE_TPEX = 80           # 上櫃：依成交金額取前 N 檔
+UNIVERSE_TWSE = 300          # 上市：依成交金額取前 N 檔
+UNIVERSE_TPEX = 150          # 上櫃：依成交金額取前 N 檔
 UNIVERSE_STICKY = 1.6        # 已在池內的股票，只要還在前 N×此倍數內就保留（避免每天進進出出）
 EXTRA_SYMBOLS = {"0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息"}
 MIN_HISTORY_DAYS = 250       # 歷史資料不足這個天數的股票不納入模型
@@ -24,6 +24,10 @@ HORIZON = 15                 # 預測未來幾個交易日
 HORIZONS = (5, 10, 15)       # 同時訓練的幾個天期，用來畫出預期路徑
 HISTORY_RANGE = "3y"         # 抓多久的歷史股價
 TRAIN_WINDOW = 500           # 訓練用最近幾個交易日
+# 放進模型的估值因子。回測（2025-11 起一年、450 檔）加入後樣本外 IC 由 0.031 降到 0.029，
+# 近兩年低本益比股票 15 日內反而較弱，所以預設不放；每天仍會計算它們的 IC 顯示在「模型說明」，
+# 若之後轉為穩定有效，可改成 ("ey", "bp", "dy", "dey")。
+VALUE_FACTORS: tuple = ()
 RIDGE_LAMBDA = 30.0          # 嶺迴歸懲罰強度（× 樣本數）。刻意設得很強：弱訊號下，接近「各因子等權」比自由估計穩定
 BACKTEST_DAYS = 250          # 滾動回測（walk-forward）涵蓋的交易日數
 REFIT_EVERY = 10             # 回測時每隔幾天重新訓練一次
@@ -32,8 +36,11 @@ MARKET_DRIFT_BLEND = 0.5     # 訓練期間平均報酬與先驗值的混合比�
 
 # ── 疊加因子（沒有足夠歷史可訓練，所以用有上限的固定權重，並由復盤結果自動調整）─────
 # 幅度以「技術面相對強度分數在股票池中的離散程度（標準差）」為單位：0.75 代表最多能把一檔股票
-# 的分數推動 0.75 個標準差。刻意設得比技術面小：這兩項還沒有回測佐證，只該微調排序，不該主導排序。
-OVERLAY_SCALE = {"news": 0.75, "chips": 0.5}
+# 的分數推動 0.75 個標準差。刻意設得比技術面小：這幾項沒有完整的樣本外回測，只該微調排序，不該主導排序。
+OVERLAY_SCALE = {"news": 0.75, "chips": 0.5, "fund": 0.6, "pattern": 0.5}
+PATTERN_LOOKBACK = 3         # K 線型態：最近幾個交易日內出現的都算（越久遠權重越低）
+PATTERN_DECAY = (1.0, 0.6, 0.35)
+MARGIN_WEIGHT = 0.5          # 籌碼分數中「融資增減（反向）」相對於「法人買賣超」的權重
 MARKET_NEWS_MAX = 0.004      # 新聞情緒對大盤 15 日預期報酬的最大調整
 ADAPT_MIN_DAYS = 8           # 至少累積幾天的實際預測才開始自動調權重
 ADAPT_BOUNDS = (0.3, 2.0)

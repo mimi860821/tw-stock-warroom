@@ -73,6 +73,7 @@ class Panel:
     fwd: dict[int, np.ndarray] = field(default_factory=dict)       # 未來 h 日報酬
     y: dict[int, np.ndarray] = field(default_factory=dict)         # 訓練目標：標準化、風險中和後的剩餘報酬
     mfwd: dict[int, np.ndarray] = field(default_factory=dict)      # 大盤未來 h 日報酬
+    risk: np.ndarray | None = None                                 # [日期, 股票, 2] 風險暴露（波動、β）
 
 
 def neutralize(A: np.ndarray, R: np.ndarray, rescale: bool = False) -> np.ndarray:
@@ -104,7 +105,7 @@ def build_panel(adj: pd.DataFrame, taiex: pd.Series, raw_factors: dict[str, pd.D
     risk = np.stack([zscore_cs(np.log(sigma_d)).values, zscore_cs(beta).values], axis=2)
     F = np.stack([neutralize(zscore_cs(raw_factors[k]).values, risk, rescale=True) for k in FACTOR_KEYS], axis=2)
     F = np.clip(F, -3, 3)
-    p = Panel(adj.index, list(adj.columns), adj, taiex, F, M, beta, sigma_d)
+    p = Panel(adj.index, list(adj.columns), adj, taiex, F, M, beta, sigma_d, risk=risk)
     with np.errstate(invalid="ignore", divide="ignore"):
         for h in C.HORIZONS:
             f = (adj.shift(-h) / adj - 1).values
@@ -114,6 +115,12 @@ def build_panel(adj: pd.DataFrame, taiex: pd.Series, raw_factors: dict[str, pd.D
             p.fwd[h], p.mfwd[h] = f, m
             p.y[h] = np.clip(neutralize(y, risk), -3, 3)
     return p
+
+
+def factor_ics(p: Panel, x: pd.DataFrame, rows) -> np.ndarray:
+    """任一因子（未放進模型的也可以）經相同標準化與風險中和後，逐日與實際結果的排序相關。"""
+    z = np.clip(neutralize(zscore_cs(x).values, p.risk, rescale=True), -3, 3)
+    return np.array([rank_ic(z[t], p.y[C.HORIZON][t]) for t in rows])
 
 
 # ── 相對強度（橫斷面）─────────────────────────────────────────────────────

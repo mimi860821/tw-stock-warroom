@@ -43,6 +43,14 @@ def _fmt(key: str, v: float) -> str:
         return "流動性較低" if v > 0 else "流動性較高"
     if key == "macd":
         return f"{v * 100:+.2f}%"
+    if key == "ey":
+        return f"本益比 {1 / v:.1f}" if v > 0 else "虧損"
+    if key == "bp":
+        return f"淨值比 {1 / v:.2f}" if v > 0 else "–"
+    if key == "dy":
+        return f"{v * 100:.2f}%"
+    if key == "dey":
+        return f"{v * 100:+.2f}%"
     return f"{v * 100:+.1f}%"
 
 
@@ -116,7 +124,8 @@ def signals(x: dict) -> list[dict]:
 
 def summary_line(act: str, mu: float, conf: float, parts: dict) -> str:
     """一句話結論：最大的加分與扣分來源。"""
-    named = {"market": "大盤走勢", "alpha": "個股技術面", "news": "新聞情緒", "chips": "法人籌碼", "us": "美股隔夜"}
+    named = {"market": "大盤走勢", "alpha": "技術面與估值", "news": "新聞情緒", "chips": "法人與融資籌碼", "us": "美股隔夜",
+             "fund": "基本面品質與成長", "pattern": "K 線型態"}
     pos = [named[k] for k, v in sorted(parts.items(), key=lambda kv: -kv[1]) if v > 0.002][:2]
     neg = [named[k] for k, v in sorted(parts.items(), key=lambda kv: kv[1]) if v < -0.002][:2]
     bits = [f"未來 15 個交易日預期報酬 {mu * 100:+.1f}%，信心 {conf:.0f}（{'贏過' if act in ('strong_buy', 'buy') or (act == 'neutral' and parts.get('alpha', 0) >= 0) else '落後'}股票池中位數的機率）"]

@@ -10,6 +10,9 @@ import pandas as pd
 from . import config as C
 
 PRED_DIR = C.DATA_DIR / "predictions"
+# 每日預測存檔的欄位：[預期報酬, 贏過中位數機率, 新聞, 籌碼, 美股, 基本面, K線型態]
+OVERLAY_COLS = {"news": 2, "chips": 3, "us": 4, "fund": 5, "pattern": 6}
+OVERLAY_LABEL = {"news": "新聞情緒", "chips": "法人與融資籌碼", "fund": "基本面（品質＋成長）", "pattern": "K 線型態"}
 
 
 def save_prediction(asof: str, payload: dict) -> None:
@@ -49,7 +52,7 @@ def evaluate(preds: list[dict], adj: pd.DataFrame, taiex: pd.Series, names: dict
     H = C.HORIZON
     dates = adj.index
     rows, pool = [], []          # pool: (kind, conf, hit, 已到期?) 供信心校準分析
-    overlay_ic = {"news": [], "chips": [], "us": []}
+    overlay_ic = {k: [] for k in OVERLAY_COLS}
     for pr in preds:
         d = pd.Timestamp(pr["asof"])
         if d not in dates:
@@ -63,7 +66,8 @@ def evaluate(preds: list[dict], adj: pd.DataFrame, taiex: pd.Series, names: dict
             rows.append(row)
             continue
         codes = [c for c in pr["stocks"] if c in adj.columns]
-        arr = np.array([pr["stocks"][c] for c in codes], dtype=float)      # mu, p_win, news, chips, us
+        width = max(len(v) for v in pr["stocks"].values())
+        arr = np.array([list(pr["stocks"][c]) + [0] * (width - len(pr["stocks"][c])) for c in codes], dtype=float)
         mu, p_up = arr[:, 0], arr[:, 1]                                    # p_up：贏過股票池中位數的機率
         real = (adj[codes].iloc[i + h] / adj[codes].iloc[i] - 1).values
         ok = np.isfinite(real) & np.isfinite(mu)
@@ -97,8 +101,10 @@ def evaluate(preds: list[dict], adj: pd.DataFrame, taiex: pd.Series, names: dict
         rows.append(row)
         for c_, h_ in zip(conf[ok], rel[ok]):
             pool.append((row["kind"], c_, h_, h >= H))
-        if row["kind"] == "live" and h >= 5 and arr.shape[1] >= 5:
-            for k, col in (("news", 2), ("chips", 3), ("us", 4)):
+        if row["kind"] == "live" and h >= 5:
+            for k, col in OVERLAY_COLS.items():
+                if arr.shape[1] <= col:
+                    continue
                 m = ok & (arr[:, col] != 0)
                 ic = _corr(arr[m, col], ex[m]) if m.sum() >= 15 else None
                 if ic is not None:
@@ -157,7 +163,7 @@ def adapt_weights(overlay_ic: dict) -> dict:
     所以一天跑幾次結果都一樣，不會越調越偏。
     """
     out = {}
-    for k in ("news", "chips"):
+    for k in OVERLAY_LABEL:
         info = overlay_ic.get(k) or {}
         ic, days = info.get("ic"), info.get("days", 0)
         w, why = 1.0, f"實際預測樣本僅 {days} 天（需 ≥ {C.ADAPT_MIN_DAYS} 天），暫維持預設權重"
@@ -176,7 +182,7 @@ def suggestions(rv: dict, bt_stats: dict, factor_diag: list[dict], weights: dict
     if rv["n_live"] < 15:
         out.append({"level": "info", "title": "實際發布的預測樣本還很少",
                     "text": f"目前只有 {rv['n_live']} 天是系統實際發布的預測，其餘 {rv['n_backtest']} 天是用滾動回測補齊"
-                            "（只含技術面，不含新聞與籌碼）。15 日預測要 3 週後才能完整驗證，建議至少累積一個月再評斷模型。"})
+                            "（只含技術面與估值，不含新聞、籌碼、基本面品質與 K 線型態）。15 日預測要 3 週後才能完整驗證，建議至少累積一個月再評斷模型。"})
     if a:
         if a["n_hi"] >= 100 and a["rel_hit"] is not None:
             if a["hit_hi"] - a["rel_hit"] >= 2:
@@ -223,7 +229,7 @@ def suggestions(rv: dict, bt_stats: dict, factor_diag: list[dict], weights: dict
     if good:
         out.append({"level": "good", "title": "近期最有效的因子",
                     "text": "、".join(f"「{f['name']}」(IC {f['ic']:+.3f})" for f in good) + "，方向與模型權重一致。"})
-    for k, label in (("news", "新聞情緒"), ("chips", "法人籌碼")):
+    for k, label in OVERLAY_LABEL.items():
         w = weights.get(k)
         if w:
             out.append({"level": "info" if w["weight"] == 1.0 else "good" if w["weight"] > 1 else "warn",

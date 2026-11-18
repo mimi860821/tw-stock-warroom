@@ -218,6 +218,109 @@ def load_chips(trading_days: list[pd.Timestamp], max_fetch: int = 25) -> pd.Data
     return pd.concat(frames, ignore_index=True)
 
 
+# ── 融資融券 ──────────────────────────────────────────────────────────────
+
+def _fetch_margin_twse(day: datetime) -> dict | None:
+    js = get_json(f"https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={day:%Y%m%d}&selectType=STOCK&response=json",
+                  tries=2, pause=8.0)
+    try:
+        if js.get("stat") != "OK":
+            return None
+        tb = next(t for t in js["tables"] if t.get("data") and len(t.get("fields", [])) >= 13)
+        # 欄位：0 代號、6 融資今日餘額、12 融券今日餘額（單位：張）
+        return {r[0].strip(): [int(_num(r[6])), int(_num(r[12]))] for r in tb["data"] if r[0].strip() and r[0].strip() != "合計"}
+    except (AttributeError, StopIteration, KeyError, IndexError, TypeError):
+        return None
+
+
+def _fetch_margin_tpex(day: datetime) -> dict | None:
+    js = get_json(f"https://www.tpex.org.tw/www/zh-tw/margin/balance?date={day:%Y}%2F{day:%m}%2F{day:%d}&response=json", tries=2)
+    try:
+        tb = js["tables"][0]
+        if tb.get("date") != f"{day.year - 1911}/{day:%m}/{day:%d}" or not tb["data"]:
+            return None
+        # 欄位：0 代號、6 資餘額、14 券餘額（單位：張）
+        return {r[0].strip(): [int(_num(r[6])), int(_num(r[14]))] for r in tb["data"]}
+    except (TypeError, KeyError, IndexError):
+        return None
+
+
+def load_margin(trading_days: list[pd.Timestamp], max_fetch: int = 25) -> pd.DataFrame:
+    """回傳長表 (date, code, margin, short)，單位：張。每日抓一次後存入 data/margin 快取。"""
+    d_ = C.DATA_DIR / "margin"
+    d_.mkdir(parents=True, exist_ok=True)
+    frames, fetched = [], 0
+    for day in reversed(trading_days):
+        p = d_ / f"{day:%Y%m%d}.json.gz"
+        if p.exists():
+            data = json.loads(gzip.decompress(p.read_bytes()))
+        elif fetched < max_fetch:
+            if fetched:
+                time.sleep(5)
+            fetched += 1
+            tw, tp = _fetch_margin_twse(day), _fetch_margin_tpex(day)
+            if tw is None and tp is None:
+                continue
+            data = {**(tp or {}), **(tw or {})}
+            if tw is not None and tp is not None:
+                p.write_bytes(gzip.compress(json.dumps(data, separators=(",", ":")).encode(), mtime=0))
+        else:
+            continue
+        df = pd.DataFrame.from_dict(data, orient="index", columns=["margin", "short"])
+        df["date"] = day
+        frames.append(df.rename_axis("code").reset_index())
+    if not frames:
+        return pd.DataFrame(columns=["date", "code", "margin", "short"])
+    return pd.concat(frames, ignore_index=True)
+
+
+# ── 風險提示與公告：注意股、處置股、除權息、內部人申報轉讓、重大訊息 ─────────────
+
+def _roc_date(s) -> str | None:
+    s = str(s or "").replace("/", "").strip()
+    try:
+        return f"{int(s[:-4]) + 1911}-{s[-4:-2]}-{s[-2:]}"
+    except (ValueError, IndexError):
+        return None
+
+
+def fetch_alerts() -> dict[str, dict]:
+    """每檔股票的風險提示與公告。任何一個來源失敗都只是少一項資訊，不影響其他。"""
+    T, P = "https://openapi.twse.com.tw/v1", "https://www.tpex.org.tw/openapi/v1"
+    out: dict[str, dict] = {}
+
+    def add(code, key, item):
+        code = str(code or "").strip()
+        if code:
+            out.setdefault(code, {}).setdefault(key, []).append(item)
+
+    for x in get_json(f"{T}/announcement/notice", tries=2) or []:
+        add(x.get("Code"), "notice", {"date": _roc_date(x.get("Date")), "text": (x.get("TradingInfoForAttention") or "").strip()})
+    for x in get_json(f"{P}/tpex_trading_warning_information", tries=2) or []:
+        add(x.get("SecuritiesCompanyCode"), "notice", {"date": _roc_date(x.get("Date")), "text": (x.get("TradingInformation") or "").strip()})
+    for x in get_json(f"{T}/announcement/punish", tries=2) or []:
+        add(x.get("Code"), "punish", {"date": _roc_date(x.get("Date")), "period": x.get("DispositionPeriod"),
+                                      "text": f"{x.get('ReasonsOfDisposition', '')}，{x.get('DispositionMeasures', '')}".strip("，")})
+    for x in get_json(f"{P}/tpex_disposal_information", tries=2) or []:
+        add(x.get("SecuritiesCompanyCode"), "punish", {"date": _roc_date(x.get("Date")), "period": x.get("DispositionPeriod"),
+                                                       "text": (x.get("DispositionReasons") or "").strip()})
+    for x in get_json(f"{T}/exchangeReport/TWT48U_ALL", tries=2) or []:
+        add(x.get("Code"), "exdiv", {"date": _roc_date(x.get("Date")), "type": f"除{x.get('Exdividend', '')}",
+                                     "cash": _num(x.get("CashDividend")) if np.isfinite(_num(x.get("CashDividend"))) else None})
+    for x in get_json(f"{P}/tpex_exright_prepost", tries=2) or []:
+        add(x.get("SecuritiesCompanyCode"), "exdiv", {"date": _roc_date(x.get("ExRrightsExDividendDate")), "type": x.get("ExRrightsExDividend", ""),
+                                                      "cash": _num(x.get("CashDividend")) if np.isfinite(_num(x.get("CashDividend"))) else None})
+    for url, kc in ((f"{T}/opendata/t187ap12_L", "公司代號"), (f"{P}/mopsfin_t187ap12_O", "SecuritiesCompanyCode")):
+        for x in get_json(url, tries=2) or []:
+            add(x.get(kc), "insider", {"who": x.get("申報人身分") or x.get("申請人身分"), "method": x.get("預定轉讓方式及股數-轉讓方式"),
+                                       "shares": _num(x.get("預定轉讓總股數-自有持股")), "period": x.get("有效轉讓期間")})
+    for url, kc, ks in ((f"{T}/opendata/t187ap04_L", "公司代號", "主旨 "), (f"{P}/mopsfin_t187ap04_O", "SecuritiesCompanyCode", "主旨")):
+        for x in get_json(url, tries=2) or []:
+            subj = " ".join(str(x.get(ks) or x.get("主旨") or "").split())
+            add(x.get(kc), "material", {"date": _roc_date(x.get("發言日期")), "subject": subj[:160]})
+    return out
+
+
 def fetch_market_flows() -> dict | None:
     """集中市場三大法人當日買賣金額合計（億元）。"""
     js = get_json("https://www.twse.com.tw/rwd/zh/fund/BFI82U?type=day&response=json", tries=2, pause=8.0)
