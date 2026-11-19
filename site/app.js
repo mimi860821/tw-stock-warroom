@@ -484,8 +484,8 @@
     barChart('rv-hit', labels, rows.map((r) => r.rel_hit), { base: 50, faded, unit: '%', details: det });
     $('#rv-sugg').innerHTML = rv.suggestions.map((s) => `<div class="sugg ${s.level}"><b>${esc(s.title)}</b><span>${esc(s.text)}</span></div>`).join('');
     const rb = bt.rank_buckets || [], mxr = Math.max(...rb.map((b) => Math.abs(b.mean)), 0.5);
-    $('#tbl-rank').innerHTML = '<thead><tr><th>當天排名</th><th class="r">樣本數</th><th class="r">15 日平均超額</th><th class="r">中位數超額</th><th class="r">贏過中位數</th></tr></thead><tbody>'
-      + rb.map((b) => `<tr><td>${esc(b.label)}</td><td class="r">${b.n.toLocaleString()}</td><td class="r"><span class="num ${cls(b.mean)}">${pct(b.mean)}</span><i class="inbar" style="width:${Math.abs(b.mean) / mxr * 40}px;background:${b.mean >= 0 ? C.up : C.dn}"></i></td>
+    $('#tbl-rank').innerHTML = '<thead><tr><th>當天排名</th><th class="r">樣本數</th><th class="r">15 日平均超額</th><th class="r">中位數</th><th class="r">勝率</th></tr></thead><tbody>'
+      + rb.map((b) => `<tr><td class="nw">${esc(b.label)}</td><td class="r">${b.n.toLocaleString()}</td><td class="r"><span class="num ${cls(b.mean)}">${pct(b.mean)}</span><i class="inbar" style="width:${Math.abs(b.mean) / mxr * 40}px;background:${b.mean >= 0 ? C.up : C.dn}"></i></td>
         <td class="r ${cls(b.median)}">${pct(b.median)}</td><td class="r">${b.beat}%</td></tr>`).join('') + '</tbody>';
     $('#tbl-calib').innerHTML = '<thead><tr><th>信心區間</th><th class="r">樣本數</th><th class="r">平均信心</th><th class="r">實際命中率</th></tr></thead><tbody>'
       + (rv.buckets.length ? rv.buckets.map((b) => `<tr><td>${esc(b.range)}</td><td class="r">${b.n.toLocaleString()}</td><td class="r">${b.avg_conf}</td><td class="r"><b>${b.hit}%</b></td></tr>`).join('') : '<tr><td colspan="4" class="hint">樣本不足</td></tr>') + '</tbody>';

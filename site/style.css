@@ -76,7 +76,8 @@ main { padding: var(--gap); }
 #v-radar { grid-template-columns: 260px minmax(0, 1fr); }
 #v-market { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); }
 #v-news { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-#v-review { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: auto minmax(0, 1fr); }
+#v-review { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 0.9fr); grid-template-rows: auto minmax(0, 1fr); }
+#v-review .chart.sm { height: clamp(140px, 22vh, 210px); }
 #v-method { grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) minmax(0, 1fr); }
 
 @media (min-width: 1100px) {
@@ -250,7 +251,11 @@ select { background: var(--surface-2); color: var(--text); border: 1px solid var
   .stamp { display: none; }
   #v-method { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   #v-method > :last-child { grid-column: 1 / -1; }
-  .tiles-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .tiles-row { grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; }
+  .tiles-row .tile { padding: 5px 8px; }
+  .tiles-row .tile .v { font-size: 15px; }
+  .tiles-row .tile .s { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #v-review .tbl td, #v-review .tbl th { padding-top: 4px; padding-bottom: 4px; }
 }
 
 /* ── 手機與平板：一般往下捲動 ── */
