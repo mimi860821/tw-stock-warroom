@@ -12,6 +12,7 @@
   <div class="brand"><h1>台股戰情室</h1><span id="edition" class="pill"></span></div>
   <nav class="tabs" id="tabs" role="tablist">
     <button role="tab" data-tab="dash" class="on">戰情總覽</button>
+    <button role="tab" data-tab="rank">排行榜</button>
     <button role="tab" data-tab="radar">選股雷達</button>
     <button role="tab" data-tab="market">大盤與美股</button>
     <button role="tab" data-tab="news">新聞與公告</button>
@@ -60,6 +61,26 @@
       </div>
       <div class="pb" id="side-feed"></div>
     </aside>
+  </section>
+
+  <!-- 排行榜 -->
+  <section class="view" id="v-rank">
+    <aside class="panel p-screens">
+      <div class="ph ph-col"><h3>排行榜</h3><p class="hint" id="rank-meta"></p></div>
+      <div class="pb" id="ranks"></div>
+    </aside>
+    <section class="panel">
+      <div class="ph">
+        <div><h3 id="rank-title"></h3><p class="hint" id="rank-desc" style="margin:0"></p></div>
+        <div class="rank-filters">
+          <div class="seg" id="rank-mkt"><button data-k="" class="on">全部市場</button><button data-k="上市">上市</button><button data-k="上櫃">上櫃</button></div>
+          <div class="seg" id="rank-kind"><button data-k="stock" class="on">個股</button><button data-k="etf">ETF</button><button data-k="">全部</button></div>
+          <select id="rank-ind" aria-label="產業"><option value="">全部產業</option></select>
+          <select id="rank-n" aria-label="顯示筆數"><option value="50">前 50</option><option value="100">前 100</option><option value="300">前 300</option></select>
+        </div>
+      </div>
+      <div class="pb"><table class="tbl" id="rank-tbl"></table></div>
+    </section>
   </section>
 
   <!-- 選股雷達 -->

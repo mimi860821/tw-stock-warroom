@@ -431,6 +431,117 @@
         ${cols.map((k) => `<td class="r">${COLS[k][1](x)}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${cols.length + 2}">${empty('目前沒有符合條件的個股')}</td></tr>`) + '</tbody>';
   }
 
+  /* ── 排行榜（全市場）─────────────────────────────────────────────── */
+  let RANK = null;
+  const rstate = { key: 'vol', mkt: '', kind: 'stock', ind: '', n: 50, sort: null };
+  const int0 = (v) => (v == null ? '–' : Math.round(v).toLocaleString());
+  const sint = (v) => (v == null ? '–' : `<span class="${cls(v)}">${v > 0 ? '+' : ''}${Math.round(v).toLocaleString()}</span>`);
+  const ft = (x) => (x.f == null ? null : (x.f || 0) + (x.t || 0));
+  const tot = (x) => (x.f == null ? null : (x.f || 0) + (x.t || 0) + (x.d || 0));
+  const streak = (v) => (v == null ? '–' : v > 0 ? `<span class="up">連買 ${v}</span>` : v < 0 ? `<span class="dn">連賣 ${-v}</span>` : '–');
+  const RCOLS = {
+    px: ['收盤', (x) => num(x.px), (x) => x.px], pct: ['漲跌幅', (x) => signed(x.pct), (x) => x.pct],
+    vol: ['成交量（張）', (x) => int0(x.vol), (x) => x.vol], val: ['成交值（億）', (x) => num(x.val), (x) => x.val],
+    turn: ['週轉率', (x) => (x.turn == null ? '–' : x.turn.toFixed(2) + '%'), (x) => x.turn],
+    vr: ['量比（今日÷20日均量）', (x) => (x.vr == null ? '–' : x.vr.toFixed(2) + ' 倍'), (x) => x.vr],
+    r5: ['近 5 日', (x) => signed(x.r5), (x) => x.r5], r20: ['近 20 日', (x) => signed(x.r20), (x) => x.r20],
+    f: ['外資（張）', (x) => sint(x.f), (x) => x.f], t: ['投信（張）', (x) => sint(x.t), (x) => x.t], d: ['自營商（張）', (x) => sint(x.d), (x) => x.d],
+    ft: ['外資＋投信', (x) => sint(ft(x)), ft], tot: ['三大法人合計', (x) => sint(tot(x)), tot],
+    fs: ['外資', (x) => streak(x.fs), (x) => x.fs], ts: ['投信', (x) => streak(x.ts), (x) => x.ts],
+    js: ['同步連買', (x) => (x.js ? `<span class="up">${x.js} 天</span>` : '–'), (x) => x.js],
+    mc1: ['融資單日（張）', (x) => sint(x.mc1), (x) => x.mc1], mc5: ['融資 5 日（張）', (x) => sint(x.mc5), (x) => x.mc5],
+    sr: ['券資比', (x) => (x.sr == null ? '–' : x.sr + '%'), (x) => x.sr],
+    pe: ['本益比', (x) => (x.pe == null ? '–' : x.pe.toFixed(1)), (x) => x.pe], dy: ['殖利率', (x) => (x.dy == null ? '–' : x.dy.toFixed(2) + '%'), (x) => x.dy],
+  };
+  const pos = (k) => (x) => x[k] != null && x[k] > 0, neg = (k) => (x) => x[k] != null && x[k] < 0, has = (k) => (x) => x[k] != null;
+  const RANKS = [
+    { g: '成交量能', key: 'vol', name: '成交量', desc: '當日成交張數最多。', f: has('vol'), s: 'vol', d: -1, cols: ['vol', 'val', 'turn'] },
+    { g: '成交量能', key: 'val', name: '成交金額', desc: '當日成交金額最大，代表市場資金最集中的股票。', f: has('val'), s: 'val', d: -1, cols: ['val', 'vol', 'turn'] },
+    { g: '成交量能', key: 'turn', name: '週轉率', desc: '成交股數 ÷ 流通股數，越高代表籌碼換手越快、越投機。', f: has('turn'), s: 'turn', d: -1, cols: ['turn', 'vol', 'val'] },
+    { g: '成交量能', key: 'surge', name: '爆量股', desc: '今日成交量是過去 20 日均量 2 倍以上（股票池內個股）。', f: (x) => x.vr >= 2, s: 'vr', d: -1, cols: ['vr', 'vol', 'val'] },
+    { g: '股價', key: 'price_hi', name: '股價最高', desc: '高價股排行（千金股）。', f: has('px'), s: 'px', d: -1, cols: ['val', 'pe'] },
+    { g: '股價', key: 'price_lo', name: '股價最低', desc: '低價股排行；低價股波動與流動性風險通常較高。', f: (x) => x.px > 0 && x.vol > 0, s: 'px', d: 1, cols: ['vol', 'val'] },
+    { g: '漲跌幅', key: 'gainers', name: '漲幅', desc: '當日漲幅最大。', f: has('pct'), s: 'pct', d: -1, cols: ['vol', 'val', 'ft'] },
+    { g: '漲跌幅', key: 'losers', name: '跌幅', desc: '當日跌幅最大。', f: has('pct'), s: 'pct', d: 1, cols: ['vol', 'val', 'ft'] },
+    { g: '漲跌幅', key: 'limit_up', name: '漲停', desc: '收盤漲幅 ≥ 9.5%。', f: (x) => x.pct >= 9.5, s: 'val', d: -1, cols: ['vol', 'val', 'ft'] },
+    { g: '漲跌幅', key: 'limit_down', name: '跌停', desc: '收盤跌幅 ≥ 9.5%。', f: (x) => x.pct <= -9.5, s: 'val', d: -1, cols: ['vol', 'val', 'ft'] },
+    { g: '漲跌幅', key: 'r5', name: '近 5 日強勢', desc: '近 5 個交易日漲幅最大（股票池內，還原權息）。', f: has('r5'), s: 'r5', d: -1, cols: ['r5', 'r20', 'vr'] },
+    { g: '漲跌幅', key: 'r20', name: '近 20 日強勢', desc: '近 20 個交易日漲幅最大（股票池內，還原權息）。', f: has('r20'), s: 'r20', d: -1, cols: ['r20', 'r5', 'vr'] },
+    { g: '漲跌幅', key: 'r20_dn', name: '近 20 日弱勢', desc: '近 20 個交易日跌幅最大（股票池內）。', f: has('r20'), s: 'r20', d: 1, cols: ['r20', 'r5', 'vr'] },
+    { g: '漲跌幅', key: 'hi52', name: '創一年新高', desc: '收盤創近 250 個交易日新高（股票池內）。', f: (x) => x.h52 === 1, s: 'r20', d: -1, cols: ['r20', 'vr', 'ft'] },
+    { g: '漲跌幅', key: 'lo52', name: '創一年新低', desc: '收盤創近 250 個交易日新低（股票池內）。', f: (x) => x.l52 === 1, s: 'r20', d: 1, cols: ['r20', 'vr', 'ft'] },
+    { g: '法人', key: 'joint', name: '法人同步買超', desc: '外資與投信同一天都買超，依兩者合計張數排序。', f: (x) => x.f > 0 && x.t > 0, s: 'ft', d: -1, cols: ['ft', 'f', 't', 'd', 'js'] },
+    { g: '法人', key: 'joint_streak', name: '外資投信連續同步買超', desc: '外資與投信連續多日同時買超（2 天以上）。', f: (x) => x.js >= 2, s: 'js', d: -1, cols: ['js', 'ft', 'f', 't'] },
+    { g: '法人', key: 'all3', name: '三大法人同步買超', desc: '外資、投信、自營商三方同一天都買超。', f: (x) => x.f > 0 && x.t > 0 && x.d > 0, s: 'tot', d: -1, cols: ['tot', 'f', 't', 'd'] },
+    { g: '法人', key: 'joint_sell', name: '法人同步賣超', desc: '外資與投信同一天都賣超。', f: (x) => x.f < 0 && x.t < 0, s: 'ft', d: 1, cols: ['ft', 'f', 't', 'd'] },
+    { g: '法人', key: 'tot_buy', name: '三大法人合計買超', desc: '三大法人合計買超張數最多。', f: (x) => tot(x) > 0, s: 'tot', d: -1, cols: ['tot', 'f', 't', 'd'] },
+    { g: '法人', key: 'tot_sell', name: '三大法人合計賣超', desc: '三大法人合計賣超張數最多。', f: (x) => tot(x) < 0, s: 'tot', d: 1, cols: ['tot', 'f', 't', 'd'] },
+    { g: '法人', key: 'f_buy', name: '外資買超', desc: '外資（不含外資自營商）買超張數。', f: pos('f'), s: 'f', d: -1, cols: ['f', 'fs', 't'] },
+    { g: '法人', key: 'f_sell', name: '外資賣超', desc: '外資賣超張數。', f: neg('f'), s: 'f', d: 1, cols: ['f', 'fs', 't'] },
+    { g: '法人', key: 't_buy', name: '投信買超', desc: '投信買超張數。', f: pos('t'), s: 't', d: -1, cols: ['t', 'ts', 'f'] },
+    { g: '法人', key: 't_sell', name: '投信賣超', desc: '投信賣超張數。', f: neg('t'), s: 't', d: 1, cols: ['t', 'ts', 'f'] },
+    { g: '法人', key: 'd_buy', name: '自營商買超', desc: '自營商（自行買賣＋避險）買超張數。', f: pos('d'), s: 'd', d: -1, cols: ['d', 'f', 't'] },
+    { g: '法人', key: 'f_streak', name: '外資連續買超', desc: '外資連續買超天數（近 20 日內）。', f: (x) => x.fs >= 3, s: 'fs', d: -1, cols: ['fs', 'f', 'ts'] },
+    { g: '法人', key: 't_streak', name: '投信連續買超', desc: '投信連續買超天數（近 20 日內）。', f: (x) => x.ts >= 3, s: 'ts', d: -1, cols: ['ts', 't', 'fs'] },
+    { g: '融資券', key: 'm_up', name: '融資增加', desc: '融資餘額單日增加最多（張）；融資大增常代表散戶追價。', f: pos('mc1'), s: 'mc1', d: -1, cols: ['mc1', 'mc5', 'sr'] },
+    { g: '融資券', key: 'm_dn', name: '融資減少', desc: '融資餘額單日減少最多（張）。', f: neg('mc1'), s: 'mc1', d: 1, cols: ['mc1', 'mc5', 'sr'] },
+    { g: '融資券', key: 'm5_up', name: '融資 5 日增加', desc: '近 5 個交易日融資餘額增加最多。', f: pos('mc5'), s: 'mc5', d: -1, cols: ['mc5', 'mc1', 'sr'] },
+    { g: '融資券', key: 'sr', name: '券資比', desc: '融券餘額 ÷ 融資餘額；高券資比有軋空題材。', f: (x) => x.sr > 0, s: 'sr', d: -1, cols: ['sr', 'mc5'] },
+    { g: '估值', key: 'dy', name: '殖利率最高', desc: '現金殖利率最高（有獲利者）。', f: (x) => x.dy > 0 && x.pe != null, s: 'dy', d: -1, cols: ['dy', 'pe'] },
+    { g: '估值', key: 'pe_lo', name: '本益比最低', desc: '本益比最低（有獲利者）；可能是低估，也可能是一次性收益或景氣高峰。', f: (x) => x.pe > 0, s: 'pe', d: 1, cols: ['pe', 'dy'] },
+  ];
+
+  function rankBase() {
+    return RANK.rows.filter((x) => (!rstate.mkt || x.m === rstate.mkt) && (!rstate.kind || x.k === rstate.kind) && (!rstate.ind || x.i === rstate.ind));
+  }
+  function renderRankList() {
+    const base = rankBase();
+    let g = '';
+    $('#ranks').innerHTML = RANKS.map((r) => {
+      const head = r.g !== g ? `<div class="scr-group">${(g = r.g)}</div>` : '';
+      return `${head}<button class="scr${r.key === rstate.key ? ' on' : ''}" data-rank="${r.key}"><b>${esc(r.name)}</b><small>${base.filter(r.f).length}</small></button>`;
+    }).join('');
+  }
+  function renderRankTable() {
+    const r = RANKS.find((x) => x.key === rstate.key) || RANKS[0];
+    $$('[data-rank]').forEach((b) => b.classList.toggle('on', b.dataset.rank === r.key));
+    $('#rank-title').textContent = `${r.name}排行`;
+    $('#rank-desc').textContent = r.desc;
+    const sort = rstate.sort || { k: r.s, d: r.d };
+    const val = RCOLS[sort.k][2];
+    const rows = rankBase().filter(r.f).filter((x) => val(x) != null)
+      .sort((a, b) => { const x = val(a), y = val(b); return (x > y ? 1 : x < y ? -1 : 0) * sort.d; }).slice(0, rstate.n);
+    const cols = ['px', 'pct', ...['vol', 'val', ...r.cols].filter((c, i, a) => a.indexOf(c) === i && c !== 'px' && c !== 'pct')];
+    $('#rank-tbl').innerHTML = `<thead><tr><th class="r">#</th><th>名稱</th>${cols.map((k) => `<th class="sortable r" data-rsort="${k}">${RCOLS[k][0]}${sort.k === k ? (sort.d > 0 ? ' ↑' : ' ↓') : ''}</th>`).join('')}</tr></thead><tbody>`
+      + (rows.length ? rows.map((x, i) => `<tr class="${x.u ? 'click' : 'dim'}"${x.u ? ` data-code="${esc(x.c)}"` : ' title="未納入分析股票池（以成交金額選出的上市 300、上櫃 150 檔）"'}>
+          <td class="r">${i + 1}</td><td class="name"><b>${esc(x.n)}</b><small>${esc(x.c)}・${esc(x.m)}・${esc(x.i)}${x.u ? '' : '・未分析'}</small></td>
+          ${cols.map((k) => `<td class="r${k === sort.k ? ' hl' : ''}">${RCOLS[k][1](x)}</td>`).join('')}</tr>`).join('')
+        : `<tr><td colspan="${cols.length + 2}">${empty('目前沒有符合條件的股票')}</td></tr>`) + '</tbody>';
+  }
+  async function renderRank() {
+    if (!RANK) {
+      $('#rank-tbl').innerHTML = `<tbody><tr><td>${empty('載入全市場資料中…')}</td></tr></tbody>`;
+      try { const js = await getJSON('data/rank.json'); RANK = { ...js, rows: js.rows.map((r) => Object.fromEntries(js.fields.map((f, i) => [f, r[i]]))) }; }
+      catch (e) { $('#rank-tbl').innerHTML = `<tbody><tr><td>${empty('排行榜資料尚未產生，下次每日更新後就會出現。')}</td></tr></tbody>`; return; }
+      [...new Set(RANK.rows.map((x) => x.i))].sort().forEach((i) => { const o = document.createElement('option'); o.value = i; o.textContent = i; $('#rank-ind').appendChild(o); });
+      $('#rank-meta').textContent = `資料日 ${RANK.date}（法人 ${RANK.chip_date || '–'}）・全市場個股 ${RANK.counts.stock.toLocaleString()} 檔、ETF ${RANK.counts.etf} 檔；可點擊的 ${RANK.counts.universe} 檔有完整分析。`;
+    }
+    renderRankList(); renderRankTable();
+  }
+  function setupRankEvents() {
+    $('#ranks').addEventListener('click', (e) => { const b = e.target.closest('[data-rank]'); if (b) { rstate.key = b.dataset.rank; rstate.sort = null; renderRankTable(); setHash(); } });
+    const seg = (id, key) => $(id).addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; rstate[key] = b.dataset.k; $$(`${id} button`).forEach((x) => x.classList.toggle('on', x === b)); renderRankList(); renderRankTable(); });
+    seg('#rank-mkt', 'mkt'); seg('#rank-kind', 'kind');
+    $('#rank-ind').addEventListener('change', (e) => { rstate.ind = e.target.value; renderRankList(); renderRankTable(); });
+    $('#rank-n').addEventListener('change', (e) => { rstate.n = +e.target.value; renderRankTable(); });
+    $('#rank-tbl').addEventListener('click', (e) => {
+      const th = e.target.closest('th[data-rsort]');
+      if (!th) return;
+      const k = th.dataset.rsort, r = RANKS.find((x) => x.key === rstate.key), cur = rstate.sort || { k: r.s, d: r.d };
+      rstate.sort = { k, d: cur.k === k ? -cur.d : -1 }; renderRankTable(); e.stopPropagation();
+    });
+  }
+
   /* ── 大盤與美股 ───────────────────────────────────────────────────── */
   function renderMarket() {
     const L = LATEST, m = L.market, u = L.us, f = m.flows;
@@ -532,7 +643,7 @@
   }
 
   /* ── 分頁與網址 ───────────────────────────────────────────────────── */
-  const VIEW_RENDER = { market: renderMarket, news: renderNews, review: renderReview, method: renderMethod, radar: renderScreens };
+  const VIEW_RENDER = { market: renderMarket, news: renderNews, review: renderReview, method: renderMethod, radar: renderScreens, rank: renderRank };
   function showTab(tab) {
     state.tab = tab;
     $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
@@ -542,7 +653,7 @@
     setHash();
   }
   function setHash() {
-    const h = state.tab === 'dash' ? `#dash/${state.code || ''}` : state.tab === 'radar' ? `#radar/${state.screen}` : `#${state.tab}`;
+    const h = state.tab === 'dash' ? `#dash/${state.code || ''}` : state.tab === 'radar' ? `#radar/${state.screen}` : state.tab === 'rank' ? `#rank/${rstate.key}` : `#${state.tab}`;
     if (location.hash !== h) history.replaceState(null, '', h);
   }
 
@@ -605,7 +716,9 @@
       renderTicker(latest); renderList(); renderSideMkt(latest); renderSide(); setupEvents();
       const [tab, arg] = location.hash.replace('#', '').split('/');
       if (tab === 'radar' && arg) state.screen = arg;
-      showTab(['dash', 'radar', 'market', 'news', 'review', 'method'].includes(tab) ? tab : 'dash');
+      if (tab === 'rank' && arg && RANKS.some((r) => r.key === arg)) rstate.key = arg;
+      setupRankEvents();
+      showTab(['dash', 'rank', 'radar', 'market', 'news', 'review', 'method'].includes(tab) ? tab : 'dash');
       selectStock(tab === 'dash' && arg && IDX[decodeURIComponent(arg)] ? decodeURIComponent(arg) : latest.top_bull[0].code, { switchTab: false });
     } catch (e) {
       const el = $('#error'); el.hidden = false;

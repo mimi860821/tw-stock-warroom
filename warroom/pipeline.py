@@ -17,7 +17,7 @@ import pandas as pd
 
 from . import config as C
 from . import chips as chipmod, explain, features, fundamentals as fundmod, model, news as newsmod
-from . import patterns as patmod, review, sources, usmkt
+from . import patterns as patmod, rankings, review, sources, usmkt
 
 log = logging.getLogger("warroom")
 
@@ -107,14 +107,14 @@ def load_prices(now: datetime):
     uni = uni.loc[codes]
     uni["industry"] = [industries.get(c, "ETF" if c.startswith("00") else "其他") for c in codes]
     _write(C.DATA_DIR / "universe.json", codes)
-    return uni, wide, tw, us_raw, asof
+    return uni, wide, tw, us_raw, asof, snap, industries
 
 
 def run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     warnings.filterwarnings("ignore", category=RuntimeWarning)      # 缺值日的平均／對數警告，計算上已處理
     now = datetime.now(C.TZ_TW)
-    uni, wide, tw, us_raw, asof = load_prices(now)
+    uni, wide, tw, us_raw, asof, snap, industries = load_prices(now)
     codes = list(uni.index)
     names = uni["name"].to_dict()
     adj, close = wide["adj"], wide["close"]
@@ -473,6 +473,11 @@ def run() -> None:
 
     _write(C.SITE_DATA_DIR / "index.json", [idx_row(c) for c in order])
     _write(C.SITE_DATA_DIR / "review.json", rv)
+    try:
+        _write(C.SITE_DATA_DIR / "rank.json", rankings.build(snap, chips, margin, val.get("today") or {}, fin, industries,
+                                                            wide, set(codes)))
+    except Exception as e:                           # 排行榜失敗不影響其他頁面
+        log.warning("排行榜產生失敗：%s", e)
     tail = slice(-130, None)
     m_mus = {h: mkt_mu[h] for h in C.HORIZONS}
     _write(C.SITE_DATA_DIR / "latest.json", {

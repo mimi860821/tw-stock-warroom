@@ -64,11 +64,16 @@ def fetch_snapshot() -> pd.DataFrame:
     twse = get_json("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL") or []
     for x in twse:
         rows.append({"code": x["Code"].strip(), "name": x["Name"].strip(), "market": "TWSE",
-                     "value": _num(x.get("TradeValue")), "close": _num(x.get("ClosingPrice"))})
+                     "value": _num(x.get("TradeValue")), "close": _num(x.get("ClosingPrice")),
+                     "volume": _num(x.get("TradeVolume")), "change": _num(x.get("Change")),
+                     "high": _num(x.get("HighestPrice")), "low": _num(x.get("LowestPrice")), "date": x.get("Date")})
     tpex = get_json("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes") or []
     for x in tpex:
         rows.append({"code": x["SecuritiesCompanyCode"].strip(), "name": x["CompanyName"].strip(),
-                     "market": "TPEX", "value": _num(x.get("TransactionAmount")), "close": _num(x.get("Close"))})
+                     "market": "TPEX", "value": _num(x.get("TransactionAmount")), "close": _num(x.get("Close")),
+                     "volume": _num(x.get("TradingShares")), "change": _num(x.get("Change")),
+                     "high": _num(x.get("High")), "low": _num(x.get("Low")), "date": x.get("Date"),
+                     "capital": _num(x.get("Capitals"))})
     df = pd.DataFrame(rows)
     if df.empty:
         raise RuntimeError("證交所與櫃買中心的行情快照都抓不到，無法決定股票池")

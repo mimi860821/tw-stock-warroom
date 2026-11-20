@@ -208,3 +208,13 @@ def test_market_up_freq_shrinks_toward_half():
     assert k > 300 and abs(freq - 0.5) < abs(raw - 0.5) + 1e-12
     fr, kr = model.up_freq(p, 399, 15, regime=True)
     assert 0 < kr < k
+
+
+def test_rankings_streaks_and_kinds():
+    from warroom import rankings
+    assert rankings._kind("2330") == "stock" and rankings._kind("0050") == "etf" and rankings._kind("00878") == "etf"
+    assert rankings._kind("084028") is None and rankings._kind("710001") is None
+    m = np.array([[True, True], [False, True], [True, True]])
+    assert rankings._streak(m).tolist() == [1, 3]
+    x = np.array([[5, -1], [3, -2], [2, -4]])
+    assert rankings._signed_streak(x).tolist() == [3, -3]

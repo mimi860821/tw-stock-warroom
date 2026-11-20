@@ -164,6 +164,7 @@ def load_valuation(dates: pd.DatetimeIndex, codes: list[str], max_fetch: int = 4
     # 有出現在估值表、但本益比空白的，是「虧損」而不是缺資料
     out["listed"] = to_wide({d: {c: 1.0 for c in s} for d, s in snaps.items()}).fillna(0.0).astype(bool)
     out["n_snapshots"] = len(snaps)
+    out["today"] = today                              # 全市場最新一日 {代號: [本益比, 淨值比, 殖利率]}
     return out
 
 
